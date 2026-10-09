@@ -166,18 +166,28 @@ class GameLoop:
             row = max(0, min(5, py // 32))
             steps_right = max(0, 9 - col)
 
+            is_west_void = np.mean(arr[py-10:py+10, max(0, px-40):max(1, px-15)] < 20) > 0.8
+            is_south_void = np.mean(arr[min(319, py+15):min(320, py+35), max(0, px-10):min(480, px+10)] < 20) > 0.8
+
             lines = [
                 "[RED'S BEDROOM (2F) NAVIGATION ADVISOR]:",
                 f"- Player Position: Col {col}/9, Row {row}/5 (X={px}, Y={py}).",
-                "- CRITICAL - SOUTH BLACK VOID: You are in an upstairs bedroom. The black area at the bottom is an impassable wall/dead space. There is NO door to the SOUTH!",
-                "- STRICT PROHIBITION: DO NOT PRESS DOWN! Pressing DOWN bumps endlessly into the black void wall!",
-                "- OBJECTIVE: The only exit downstairs to 1F is the STAIRCASE in the FAR TOP-RIGHT corner (Col 9)!",
-                "  * Safety Railing: Cols 7-8 have a white staircase railing along the top that blocks moving UP.",
-                "  * Stairs Landing: Walk all the way EAST (RIGHT) across the room to Col 9, then walk NORTH (UP) to descend the stairs!"
+                "- CRITICAL VOID BORDERS: This is an upstairs room surrounded by black void.",
             ]
+            if is_west_void:
+                lines.append("  * WEST VOID DEAD END: You are standing against the WEST WALL / BLACK VOID! DO NOT PRESS LEFT! There is NO door to the left!")
+            if is_south_void:
+                lines.append("  * SOUTH VOID DEAD END: You are standing against the SOUTH WALL / BLACK VOID! DO NOT PRESS DOWN! There is NO door to the south!")
+
+            lines.extend([
+                "- OBJECTIVE & EXIT: The ONLY exit downstairs to 1F is the STAIRCASE in the FAR TOP-RIGHT corner (Col 9)!",
+                "  * Safety Railing: Cols 7-8 have a white staircase railing along the top that blocks moving UP.",
+                "  * Stairs Landing: Walk EAST (RIGHT) across the room to Col 9, then walk NORTH (UP) to descend the stairs!"
+            ])
+
             if col < 9:
                 actions = ["RIGHT"] * min(steps_right, 4)
-                lines.append(f"- Recommended Action: Walk RIGHT toward Col 9 -> actions = {actions}")
+                lines.append(f"- Recommended Action: Walk RIGHT toward center/east of room -> actions = {actions}")
             else:
                 lines.append("- Recommended Action: You have reached Col 9! Walk UP into the staircase landing -> actions = ['UP', 'UP']")
             return "\n".join(lines)
@@ -515,6 +525,26 @@ class GameLoop:
                     print("[Naming Screen] Waiting for user to complete character naming.")
                     flat_actions = ["WAIT"]
                 elif not self.in_battle and flat_actions:
+                    # Physical Void Guard: If character is against a black void wall and attempts to move into it,
+                    # override immediately towards open center of room.
+                    first_btn = flat_actions[0].upper().strip()
+                    try:
+                        arr_check = np.array(frame.resize((480, 320)))
+                        cap_m = (arr_check[:, :, 0] > 175) & (arr_check[:, :, 1] < 105) & (arr_check[:, :, 2] < 105)
+                        cy_i, cx_i = np.where(cap_m)
+                        if len(cy_i) > 0:
+                            py_i, px_i = int(np.median(cy_i)), int(np.median(cx_i))
+                            is_left_void = np.mean(arr_check[py_i-10:py_i+10, max(0, px_i-40):max(1, px_i-15)] < 20) > 0.8
+                            is_down_void = np.mean(arr_check[min(319, py_i+15):min(320, py_i+35), max(0, px_i-10):min(480, px_i+10)] < 20) > 0.8
+                            if first_btn == "LEFT" and is_left_void:
+                                print(f"[Void Guard] Blocked by West Black Void at X={px_i}! Overriding to RIGHT (moving toward center of room).")
+                                flat_actions = ["RIGHT", "RIGHT"]
+                            elif first_btn == "DOWN" and is_down_void:
+                                print(f"[Void Guard] Blocked by South Black Void at Y={py_i}! Overriding to RIGHT (toward stairs).")
+                                flat_actions = ["RIGHT", "RIGHT"]
+                    except Exception:
+                        pass
+
                     # Overworld Turning Mechanic:
                     # If Red is facing direction A and the first action is direction B,
                     # the first press only turns Red in place! A second press is required to actually move.

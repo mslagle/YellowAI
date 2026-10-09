@@ -21,13 +21,15 @@ class POIDetector:
     4. Room boundaries (black void borders, obstacles).
     """
 
-    def __init__(self, target_width: int = 480, target_height: int = 320):
+    def __init__(self, target_width: int = 480, target_height: int = 320, debug_save_path: Optional[str] = "logs/last_poi_annotated.png"):
         self.target_width = target_width
         self.target_height = target_height
+        self.debug_save_path = debug_save_path
 
     def analyze_frame(self, frame: Image.Image, current_area: str = "") -> Dict[str, Any]:
         """
         Analyzes a captured frame and returns detected POIs and spatial guidelines.
+        Optionally saves an annotated debug screenshot showing what NumPy detected.
         """
         resized = frame.resize((self.target_width, self.target_height))
         arr = np.array(resized)
@@ -49,7 +51,37 @@ class POIDetector:
         elif result["room_type"] == "OVERWORLD":
             self._analyze_overworld(arr, result)
 
+        # Save annotated debug visual if path specified
+        if self.debug_save_path:
+            self._save_debug_annotated_image(resized, result)
+
         return result
+
+    def _save_debug_annotated_image(self, img: Image.Image, result: Dict[str, Any]):
+        """Saves an annotated image drawing bounding boxes around detected player and POIs."""
+        try:
+            from PIL import ImageDraw
+            annotated = img.copy()
+            draw = ImageDraw.Draw(annotated)
+
+            # Draw player
+            player = result.get("player", {})
+            if player.get("detected"):
+                px, py = player["x"], player["y"]
+                draw.rectangle([px - 14, py - 14, px + 14, py + 14], outline=(255, 50, 50), width=2)
+                draw.text((px - 20, max(0, py - 26)), f"Red ({player.get('facing', '?')})", fill=(255, 50, 50))
+
+            # Draw detected warps
+            for warp in result.get("warps", []):
+                wx, wy = warp.get("x", -1), warp.get("y", -1)
+                w_type = warp.get("type", "WARP")
+                if wx > 0 and wy > 0:
+                    draw.rectangle([wx - 12, wy - 12, wx + 12, wy + 12], outline=(255, 165, 0), width=2)
+                    draw.text((wx - 25, max(0, wy - 22)), w_type, fill=(255, 165, 0))
+
+            annotated.save(self.debug_save_path)
+        except Exception:
+            pass
 
     def _detect_player(self, arr: np.ndarray) -> Dict[str, Any]:
         """Locates Red's sprite via red cap and determines rough facing direction."""
@@ -142,8 +174,10 @@ class POIDetector:
         notes: List[str] = []
         notes.append("Red is in his 2F Bedroom.")
 
+        if voids["west_void"]:
+            notes.append("WEST VOID DEAD END: You are standing against the WEST WALL / BLACK VOID! DO NOT press LEFT! There is NO door to the left!")
         if voids["south_void"]:
-            notes.append("The bottom of the screen is an impassable BLACK VOID dead end. There is NO door to the SOUTH! DO NOT press DOWN!")
+            notes.append("SOUTH VOID DEAD END: The bottom of the screen is an impassable BLACK VOID dead end. There is NO door to the SOUTH! DO NOT press DOWN!")
 
         if mat_visible:
             mat_x = int(np.median(mx))

@@ -302,8 +302,7 @@ Analyze Red's position and obstacles. Return JSON with 'recommended_button', 'si
                     ]
                 }
             ],
-            "temperature": 0.2,
-            "response_format": {"type": "json_object"}
+            "temperature": 0.2
         }
 
         chat_url = f"{self.base_url}/chat/completions" if self.base_url.endswith("/v1") else f"{self.base_url}/v1/chat/completions"
