@@ -69,7 +69,8 @@ class AntiStuckWatchdog:
         button: str,
         prev_thumb: Optional[np.ndarray],
         curr_thumb: Optional[np.ndarray],
-        is_menu_or_naming: bool = False
+        is_menu_or_naming: bool = False,
+        current_area: str = ""
     ) -> Tuple[bool, Optional[str]]:
         """
         Evaluates an immediate step within a multi-action batch.
@@ -84,8 +85,10 @@ class AntiStuckWatchdog:
         mean_val = float(np.mean(curr_thumb))
 
         # 1. Doorway warp or battle encounter flash/fade
+        # Upstairs rooms (bedroom, 2F, 3F, roof) do not have south doorway exits!
+        is_upstairs = any(x in current_area.lower() for x in ["bedroom", "2f", "3f", "roof", "naming"])
         if not is_menu_or_naming and (diff >= self.warp_diff_threshold or mean_val < 12.0):
-            if btn in OPPOSITE_DIRECTIONS:
+            if btn in OPPOSITE_DIRECTIONS and not is_upstairs:
                 self.doorway_warp_turns = 2
                 self.last_warp_direction = btn
             return True, f"SCENE_WARP_OR_BATTLE (diff={diff:.1f})"

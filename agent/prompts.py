@@ -91,6 +91,11 @@ To reach the Pokémon League and challenge the Elite Four, you must earn 8 Gym B
     2. Turn **RIGHT** (east) to walk past the fence and between the houses.
     3. Once in the open central thoroughfare between Red's house and Blue's house, walk **NORTH (UP)** through the path into the tall grass to trigger Professor Oak!
   - **HOW TO VISIT OAK'S LAB**: Walk **SOUTH-EAST** (DOWN and RIGHT) to the large building with the sign in southeast Pallet Town.
+- **CRITICAL UNIVERSAL WARP & DOOR MECHANIC (NO 'A' BUTTON NEEDED)**:
+  - In Pokémon games, doors, staircases, and cave entrances warp you **AUTOMATICALLY** when you step onto their tile!
+  - **THERE ARE NO DOORS TO 'OPEN' WITH THE A BUTTON!**
+  - **DO NOT PRESS 'A' TO ENTER OR EXIT DOORS OR STAIRS!** Pressing 'A' when facing a wall or empty space does nothing or inspects solid walls.
+  - Simply **WALK** directly onto the staircase, door threshold, or welcome mat!
 - **CRITICAL UNIVERSAL INTERACTION RULE (INTERACT FROM IN FRONT / BELOW)**:
   - In Pokémon games, you CANNOT interact with items, desks, counters, tables, PCs, or signs from behind or from above!
   - You MUST stand in **FRONT** of the object: standing **BELOW** (south of) the object, facing **UP** (north) directly against its front edge, and press **A**!
@@ -106,6 +111,11 @@ To reach the Pokémon League and challenge the Elite Four, you must earn 8 Gym B
       3. Face **UP** (north) against the bottom front edge of the table.
       4. Press **A** to inspect the Poké Ball and claim your starter Pikachu!
     - After inspecting the Poké Ball from the front, Oak and your rival will trigger the starter cutscene.
+- **GBA Turning Mechanics (2 Button Presses to Move When Changing Direction)**:
+  - If Red is NOT already facing the direction you want to travel (e.g. Red is facing DOWN or RIGHT, and you want to walk LEFT or UP):
+  - **The FIRST button press only turns the character in place to face that direction!** Red does NOT take a step on the tile yet!
+  - **The SECOND button press actually steps forward onto the adjacent tile!**
+  - **BATCHING RULE**: Whenever changing direction, always include AT LEAST 2 button presses of that direction in your action batch (e.g. `["RIGHT", "RIGHT"]` to turn right and take 1 step, or `["UP", "UP", "UP"]` to turn up and take 2 steps)!
 - **CRITICAL ANTI-REVERSAL RULE WHEN TRAVELING**:
   - When moving/traveling in the overworld, **NEVER** choose the exact opposite direction of your previous successful step (e.g. do NOT press UP immediately after a successful DOWN step; do NOT press LEFT immediately after a successful RIGHT step).
   - Immediately reversing direction causes you to undo your progress, walk in circles, or ping-pong in and out of doorways!
@@ -321,70 +331,6 @@ A new battle has started or an enemy Pokémon has switched on screen!
    - Bag / Poké Ball: actions = ["RIGHT", "A", "A"]
    - Move PP Verification: Inspect remaining PP (PP xx/xx). NEVER choose a 0-PP move!
 4. State your 2-3 step gameplan in 'micro_step' so subsequent turns can execute swiftly!"""
-
-NAMING_SCREEN_GUIDANCE = """[KEYBOARD NAMING SCREEN DETECTED - PROFESSOR OAK INTRO]:
-You are on the GBA Character Naming Screen!
-
-TOP PRIORITY: CREATE A MEANINGFUL NAME FIRST!
-- DO NOT worry about leaving the bedroom yet -- you must finish naming your character first!
-- Recommended Names:
-  * For Player (boy in red cap / "Your name?"): Choose "RED", "YELLOW", or "ASH".
-  * For Rival (boy with spiky hair / "Your rival's name?"): Choose "BLUE" or "GARY".
-  * For Pokémon ("Nickname?"): Pick a cool nickname.
-
-STRICT DIRECTIVE: NEVER DELETE EXISTING LETTERS!
-- NEVER PRESS B TO BACKSPACE OR DELETE LETTERS!
-- If any letters have been entered (even typos, accidental letters, or 1-2 letters): SIMPLY ACCEPT THE NAME AS-IS!
-- As soon as any characters are entered: press START ('[OK]') immediately to confirm!
-- If the name field is empty: type 1 to 3 letters forward and press START.
-- When Professor Oak asks for confirmation ("Are you OK with this name? Yes / No" or "So your name is [name]?"):
-  * Always press A on "Yes" to accept immediately! NEVER choose "No" and NEVER press B!
-
-KEYBOARD LAYOUT & 2D GRID STRUCTURE (4 ROWS x 7 COLS):
-  Row 0: a  b  c    d  e  f    .
-  Row 1: g  h  i    j  k  l    ,
-  Row 2: m  n  o    p  q  r    s   <-- 'r' IS ON ROW 2!
-  Row 3: t  u  v    w  x  y    z
-
-CRITICAL 2D GRID NAVIGATION RULES:
-- The keyboard is a 4-ROW VERTICAL GRID, NOT A 1D LINE!
-- DO NOT ONLY PRESS RIGHT! Letters like 'r', 'm', 'n', 'p', 's' are on Row 2; letters like 't', 'u', 'v', 'w', 'x', 'y', 'z' are on Row 3.
-- Pressing RIGHT repeatedly will NEVER reach Row 2 or Row 3! It will only hit the edge of Row 0.
-- YOU MUST PRESS 'DOWN' TO DESCEND TO LOWER ROWS!
-  * From Row 0 to Row 1: Press DOWN 1 time!
-  * From Row 0 to Row 2 (e.g. to reach 'r'): Press DOWN 2 times!
-  * From Row 0 to Row 3: Press DOWN 3 times!
-  * To move back up to higher rows: Press UP!
-
-CONTROLS:
-- D-Pad (UP, DOWN, LEFT, RIGHT): Navigate cursor in 2D space.
-- A Button: Type the highlighted letter ('[Ok]').
-- B Button: Backspace / delete previous letter ('[BACK] B BUTTON').
-- SELECT Button: Switch character case ('[others] SELECT▶' toggles upper/lower case).
-- START Button: Press START ONLY AFTER you have typed your chosen letters to submit [OK]!
-
-STEP-BY-STEP TYPING INSTRUCTIONS:
-1. Navigate with the D-Pad to each letter of your chosen name and press A to type it.
-   - Example to type "RED":
-     * Step 1: Move from 'a' (Row 0, Col 0) to 'r' (Row 2, Col 5):
-       You MUST press DOWN twice to reach Row 2, then RIGHT 5 times to reach Col 5, then press A:
-       actions = ["DOWN", "DOWN", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "A"]
-     * Step 2: Move from 'r' (Row 2, Col 5) to 'e' (Row 0, Col 4):
-       Press UP twice to return to Row 0, then LEFT once to reach Col 4, then press A:
-       actions = ["UP", "UP", "LEFT", "A"]
-     * Step 3: Move from 'e' (Row 0, Col 4) to 'd' (Row 0, Col 3):
-       Press LEFT once to reach Col 3, then press A:
-       actions = ["LEFT", "A"]
-     * Step 4: Now that 'RED' is typed, press START to confirm [OK]:
-       actions = ["START"]
-   - Example to type "ASH":
-     * Step 1: 'a' is already selected at (0, 0)! Press A: actions = ["A"]
-     * Step 2: Move to 's' (Row 2, Col 6): actions = ["DOWN", "DOWN", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "A"]
-     * Step 3: Move to 'h' (Row 1, Col 1): actions = ["UP", "LEFT", "LEFT", "LEFT", "LEFT", "LEFT", "A"]
-     * Step 4: Now press START to submit: actions = ["START"]
-2. CONFIRMATION POPUP ("Are you OK with this name? Yes / No"):
-   - When Professor Oak asks for confirmation, cursor defaults to 'Yes'. Press A to confirm: actions = ["A"]!"""
-
 
 
 def build_turn_prompt(

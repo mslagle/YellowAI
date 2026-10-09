@@ -43,9 +43,10 @@ from config import (
 from emulator.screen_capture import ScreenCapture
 from emulator.input_controller import InputController
 from agent.gemini_player import GeminiPlayer
-from agent.prompts import BATTLE_TACTICAL_GUIDANCE, NAMING_SCREEN_GUIDANCE
+from agent.prompts import BATTLE_TACTICAL_GUIDANCE
 from core.memory_manager import MemoryManager
 from core.anti_stuck import AntiStuckWatchdog, OPPOSITE_DIRECTIONS
+from core.poi_detector import POIDetector
 from tts.audio_queue import AudioQueueManager
 from overlay.server import OverlayServer
 
@@ -102,6 +103,7 @@ class GameLoop:
                 thinking_budget=thinking_budget
             )
         self.anti_stuck = AntiStuckWatchdog(threshold_consecutive=ANTI_STUCK_CONSECUTIVE_THRESHOLD)
+        self.poi_detector = POIDetector(target_width=CAPTURE_TARGET_WIDTH, target_height=CAPTURE_TARGET_HEIGHT)
         
         self.enable_tts = enable_tts
         self.audio_queue = AudioQueueManager() if enable_tts else None
@@ -113,6 +115,7 @@ class GameLoop:
         self.current_opponent: Optional[str] = None
         self.battle_advisor_given_for_opponent: Optional[str] = None
         self.previous_frame: Optional[Image.Image] = None
+        self.last_facing_direction: Optional[str] = None
 
     def _is_naming_screen(self, frame: Image.Image) -> bool:
         """Visual check for the GBA Gen 3 / Recharged Yellow naming keyboard screen in all modes (Upper/Lower/Symbols)."""
@@ -130,172 +133,69 @@ class GameLoop:
         except Exception:
             return False
 
-    def _get_naming_keyboard_advice(self, arr, who: str, target_name: str) -> str:
-        """Analyzes active cursor position, name field capacity, and computes 2D D-pad path."""
-        import numpy as np
+    def _is_bedroom(self, frame: Image.Image) -> bool:
+        """Detects if the player is in Red's 2F bedroom upstairs surrounded by black void."""
+        try:
+            resized = frame.resize((480, 320))
+            arr = np.array(resized)
+            black_bottom = np.mean(arr[200:, :, :] < 20) > 0.8
+            upper = arr[:160, 160:480]
+            tatami = (upper[:, :, 0] > 140) & (upper[:, :, 1] > 120) & (upper[:, :, 2] < 110)
+            rug = (upper[:, :, 0] < 130) & (upper[:, :, 1] > 140) & (upper[:, :, 2] > 70)
+            has_bedroom_floor = (np.mean(tatami) + np.mean(rug)) > 0.35
+            return black_bottom and has_bedroom_floor
+        except Exception:
+            return False
 
-        # 1. Detect GBA cream/ivory cursor ring (RGB555 converted to RGB888: 255, 244, 224)
-        ring = (arr[:, :, 0] >= 253) & (arr[:, :, 1] >= 242) & (arr[:, :, 1] <= 247) & (arr[:, :, 2] >= 222) & (arr[:, :, 2] <= 227)
-        ys, xs = np.where(ring)
-        if len(ys) > 40:
-            cy = int(np.mean(ys))
-            cx = int(np.mean(xs))
-        else:
-            # Fallback pure white
-            pure_white = (arr[150:310, 50:370, 0] > 240) & (arr[150:310, 50:370, 1] > 240) & (arr[150:310, 50:370, 2] > 240)
-            ys, xs = np.where(pure_white)
-            if len(ys) > 40:
-                cy = 150 + int(np.mean(ys))
-                cx = 50 + int(np.mean(xs))
-            else:
-                cy, cx = 180, 77
+    def _get_bedroom_advice(self, frame: Image.Image) -> str:
+        """Provides precise visual grid advice to escape Red's bedroom to the stairs."""
+        try:
+            resized = frame.resize((480, 320))
+            arr = np.array(resized)
+            cap = (arr[:, :, 0] > 175) & (arr[:, :, 1] < 105) & (arr[:, :, 2] < 105)
+            y_idx, x_idx = np.where(cap)
+            if len(y_idx) == 0:
+                return (
+                    "[RED'S BEDROOM (2F) ADVISOR]:\n"
+                    "- The bottom of the room is surrounded by BLACK VOID. DO NOT press DOWN!\n"
+                    "- The stairs to 1F are in the FAR TOP-RIGHT corner. Walk RIGHT to Col 9, then walk UP into the stairs!"
+                )
+            py = int(np.median(y_idx))
+            px = int(np.median(x_idx))
+            col = max(0, min(9, (px - 160) // 32))
+            row = max(0, min(5, py // 32))
+            steps_right = max(0, 9 - col)
 
-        if cx > 380:
-            if cy < 200:
-                best_r, best_c = 0, 8
-                curr_char = "[others] (case toggle on right)"
-            elif cy < 250:
-                best_r, best_c = 1, 8
-                curr_char = "[BACK] (delete/backspace on right)"
-            else:
-                best_r, best_c = 3, 8
-                curr_char = "[OK] (confirm on bottom right)"
-            curr_pos_desc = curr_char
-        else:
-
-            # Determine Row (0..3)
-            if cy < 198:
-                best_r = 0
-            elif cy < 230:
-                best_r = 1
-            elif cy < 260:
-                best_r = 2
-            else:
-                best_r = 3
-
-            # Determine Col (0..7)
-            if cx < 89:
-                best_c = 0
-            elif cx < 113:
-                best_c = 1
-            elif cx < 155:
-                best_c = 2
-            elif cx < 201:
-                best_c = 3
-            elif cx < 225:
-                best_c = 4
-            elif cx < 249:
-                best_c = 5
-            elif cx < 290:
-                best_c = 6
-            else:
-                best_c = 7
-
-            grid = [
-                ['A', 'B', 'C', 'D', 'E', 'F', 'F', '.'],
-                ['G', 'H', 'I', 'J', 'K', 'L', 'L', ','],
-                ['M', 'N', 'O', 'P', 'Q', 'R', 'S', 'S'],
-                ['T', 'U', 'V', 'W', 'X', 'Y', 'Z', '[Space]'],
+            lines = [
+                "[RED'S BEDROOM (2F) NAVIGATION ADVISOR]:",
+                f"- Player Position: Col {col}/9, Row {row}/5 (X={px}, Y={py}).",
+                "- CRITICAL - SOUTH BLACK VOID: You are in an upstairs bedroom. The black area at the bottom is an impassable wall/dead space. There is NO door to the SOUTH!",
+                "- STRICT PROHIBITION: DO NOT PRESS DOWN! Pressing DOWN bumps endlessly into the black void wall!",
+                "- OBJECTIVE: The only exit downstairs to 1F is the STAIRCASE in the FAR TOP-RIGHT corner (Col 9)!",
+                "  * Safety Railing: Cols 7-8 have a white staircase railing along the top that blocks moving UP.",
+                "  * Stairs Landing: Walk all the way EAST (RIGHT) across the room to Col 9, then walk NORTH (UP) to descend the stairs!"
             ]
-            curr_char = grid[best_r][best_c]
-            curr_pos_desc = f"'{curr_char}' (Row {best_r}, Col {best_c})"
-
-        # 2. Name field character density analysis (character slots start at x=192)
-        slot_counts = []
-        for slot in range(7):
-            x1 = 192 + slot * 20
-            x2 = x1 + 20
-            patch = arr[98:115, x1:x2]
-            dark = int(np.sum(np.mean(patch < 120, axis=2) > 0.5))
-            slot_counts.append(dark)
-
-        num_chars = sum(1 for c in slot_counts if c > 20)
-        is_full = (num_chars >= 7) or (sum(slot_counts) > 280)
-        has_chars = num_chars > 0
-
-        # 3. Path calculation to next target letter
-        char_coords = {
-            'A': (0, 0), 'B': (0, 1), 'C': (0, 2), 'D': (0, 3), 'E': (0, 4), 'F': (0, 5),
-            'G': (1, 0), 'H': (1, 1), 'I': (1, 2), 'J': (1, 3), 'K': (1, 4), 'L': (1, 5),
-            'M': (2, 0), 'N': (2, 1), 'O': (2, 2), 'P': (2, 3), 'Q': (2, 4), 'R': (2, 5), 'S': (2, 6),
-            'T': (3, 0), 'U': (3, 1), 'V': (3, 2), 'W': (3, 3), 'X': (3, 4), 'Y': (3, 5), 'Z': (3, 6)
-        }
-
-        # Next letter in target name
-        target_char = target_name[0]
-        target_r, target_c = char_coords.get(target_char, (2, 5))
-
-        moves = []
-        if best_r == 3 and best_c == 7:  # on [Space] at bottom-right
-            moves = ['UP', 'LEFT']
-        elif best_c == 8:  # on right-side action buttons
-            moves = ['LEFT'] + ['UP'] * max(0, best_r - target_r) + ['DOWN'] * max(0, target_r - best_r)
-        else:
-            dr = target_r - best_r
-            dc = target_c - best_c
-            if dr > 0:
-                moves.extend(['DOWN'] * dr)
-            elif dr < 0:
-                moves.extend(['UP'] * abs(dr))
-            if dc > 0:
-                moves.extend(['RIGHT'] * dc)
-            elif dc < 0:
-                moves.extend(['LEFT'] * abs(dc))
-
-        recommended_batch = moves + ['A'] if moves else ['A']
-
-        lines = [
-            "[KEYBOARD STATE & 2D NAVIGATION ADVISOR]:",
-            f"- Target Character: {who} -> Chosen Name: '{target_name}'",
-            f"- Active Cursor: Currently highlighting {curr_pos_desc}"
-        ]
-
-        if has_chars:
-            lines.extend([
-                f"- Name Field Status: Text entered (~{num_chars} characters present).",
-                "- STRICT DIRECTIVE: NEVER DELETE EXISTING LETTERS! Simply accept whatever name is entered!",
-                "- ACTION: Press START immediately to confirm [OK]! Do NOT try to fix typos or backspace!",
-                "- Recommended actions: ['START']"
-            ])
-        else:
-            lines.extend([
-                f"- Name Field Status: Empty/Blank (ready to type '{target_name}').",
-                "- STRICT DIRECTIVE: Type letters forward -- NEVER press B to backspace! Simply accept any letters you type!",
-                f"- Next target letter '{target_char}' is at Row {target_r}, Col {target_c}.",
-                f"  CRITICAL 2D GRID RULE: Letter '{target_char}' is on ROW {target_r}! You CANNOT reach it by only pressing RIGHT!"
-            ])
-            if 'UP' in moves:
-                lines.append(f"  You MUST press UP to ascend toward Row {target_r}!")
-            elif 'DOWN' in moves:
-                lines.append(f"  You MUST press DOWN to descend toward Row {target_r}!")
-            lines.append(f"  Recommended actions to reach and type '{target_char}': {recommended_batch}")
-            lines.append(f"- As soon as any letter is entered, press START to confirm [OK]!")
-        return "\n".join(lines)
+            if col < 9:
+                actions = ["RIGHT"] * min(steps_right, 4)
+                lines.append(f"- Recommended Action: Walk RIGHT toward Col 9 -> actions = {actions}")
+            else:
+                lines.append("- Recommended Action: You have reached Col 9! Walk UP into the staircase landing -> actions = ['UP', 'UP']")
+            return "\n".join(lines)
+        except Exception:
+            return "[RED'S BEDROOM (2F) ADVISOR]: Walk RIGHT to top-right corner (Col 9), then walk UP to go downstairs."
 
     def _detect_screen_mode(self, frame: Image.Image) -> str:
         """Lightweight screen mode hint to streamline Gemini prompt focus."""
         if self._is_naming_screen(frame):
-            try:
-                import numpy as np
-                resized = frame.resize((480, 320))
-                arr = np.array(resized)
-                has_red_cap = np.any((arr[50:110, 80:160, 0] > 180) & (arr[50:110, 80:160, 1] < 80) & (arr[50:110, 80:160, 2] < 80))
-                who = "Player Character (Red)" if has_red_cap else "Rival Character (Blue)"
-                target_name = "RED" if has_red_cap else "BLUE"
-                print(f"[Screen Mode Detected] Naming Keyboard Screen -> Naming {who}!")
+            print("[Screen Mode Detected] Naming Keyboard Screen -> Waiting for user to complete naming.")
+            return "NAMING SCREEN: User is entering character name manually. Return actions = ['WAIT']."
 
-                naming_advisor = self._get_naming_keyboard_advice(arr, who, target_name)
-
-                # Dynamically align quest priorities with character naming
-                prio = (self.memory_manager.priority_quest or "").lower()
-                if "bedroom" in prio or "mom" in prio or not prio:
-                    self.memory_manager.set_priority_quest(f"Name {who}: Type a meaningful name (e.g. '{target_name}') on keyboard, then confirm with START")
-                    self.memory_manager.current_area = "Intro: Character Naming Screen"
-                    self.memory_manager.update_micro_step(f"Type '{target_name}' on keyboard")
-
-                return f"{NAMING_SCREEN_GUIDANCE}\n\n{naming_advisor}"
-            except Exception:
-                return NAMING_SCREEN_GUIDANCE
+        # Check if in Red's upstairs bedroom
+        if self._is_bedroom(frame):
+            self.memory_manager.current_area = "Pallet Town (Red's Bedroom)"
+            if "bedroom" not in (self.memory_manager.priority_quest or "").lower():
+                self.memory_manager.set_priority_quest("Leave Red's bedroom, go downstairs, and talk to Mom")
+            return self._get_bedroom_advice(frame)
 
         # If we just left the naming screen, transition back to bedroom/Pallet Town quest
         if self.memory_manager.current_area == "Intro: Character Naming Screen":
@@ -310,7 +210,11 @@ class GameLoop:
             return "BATTLE MODE: Check move PP (PP xx/xx). NEVER select a 0-PP move! If 'There\'s no PP left for this move!' is on screen, press A/B to clear, then press RIGHT or DOWN to pick a DIFFERENT move slot, switch Pokémon, or RUN!"
         if "mart" in area or "buy" in micro or "shop" in micro or "clerk" in micro or "quit" in micro:
             return "SHOP/MENU MODE: If on clerk menu (Buy/Sell/Quit) or done shopping, press DOWN to highlight 'Quit' and press A to exit! DO NOT press A on 'Buy'!"
-        return "OVERWORLD NAVIGATION: Focus on orthogonal navigation, obstacle clearance, and doorway anti-reversals."
+
+        # Extract real-time POIs via fast NumPy spatial detection
+        poi_analysis = self.poi_detector.analyze_frame(frame, current_area=self.memory_manager.current_area)
+        poi_prompt = self.poi_detector.format_poi_prompt(poi_analysis)
+        return f"OVERWORLD NAVIGATION\n\n{poi_prompt}"
 
     def _export_overlay_state(self, action: str, thought: Optional[str] = None):
         """Exports the latest state to JSON for OBS browser source overlay."""
@@ -608,10 +512,19 @@ class GameLoop:
                     flat_actions = decision.get("flat_actions", [button])
 
                 if is_naming:
-                    # Enforce directive: NEVER delete existing letters on the naming screen!
-                    if any(btn == "B" for btn in flat_actions):
-                        print("[Naming Guard] Directive active: Never delete existing letters! Intercepting 'B' and confirming with START.")
-                        flat_actions = ["START"]
+                    print("[Naming Screen] Waiting for user to complete character naming.")
+                    flat_actions = ["WAIT"]
+                elif not self.in_battle and flat_actions:
+                    # Overworld Turning Mechanic:
+                    # If Red is facing direction A and the first action is direction B,
+                    # the first press only turns Red in place! A second press is required to actually move.
+                    first_dir = flat_actions[0].upper().strip()
+                    if first_dir in OPPOSITE_DIRECTIONS:
+                        if self.last_facing_direction and self.last_facing_direction != first_dir:
+                            # Prepend an extra turn press if the AI only sent a single press
+                            if len(flat_actions) == 1 or flat_actions[1].upper().strip() != first_dir:
+                                print(f"[Turning Assist] Changing facing from {self.last_facing_direction} to {first_dir}: prepending turn press.")
+                                flat_actions = [first_dir] + flat_actions
 
                 # 9. Multi-Action Batch Execution with Reactive Interrupt Watchdog
                 executed_actions: List[str] = []
@@ -644,7 +557,7 @@ class GameLoop:
                         else:
                             # Check if this step should interrupt subsequent actions
                             step_interrupted, interrupt_why = self.anti_stuck.check_step_interrupt(
-                                btn, current_step_thumb, step_thumb
+                                btn, current_step_thumb, step_thumb, is_menu_or_naming=False, current_area=self.memory_manager.current_area
                             )
                             step_outcome = "BLOCKED" if (step_interrupted and "COLLISION" in interrupt_why) else "MOVED"
                             self.anti_stuck.record_action(self.turn_id, btn, reasoning, outcome=step_outcome)
@@ -661,6 +574,13 @@ class GameLoop:
                 action_summary = " -> ".join(executed_actions) if executed_actions else "WAIT"
                 if len(executed_actions) > 1:
                     print(f"[Batch Executed]: [{action_summary}] ({len(executed_actions)} steps)")
+
+                # Update tracked character facing direction in overworld
+                for act in reversed(executed_actions):
+                    act_upper = act.upper().strip()
+                    if act_upper in OPPOSITE_DIRECTIONS:
+                        self.last_facing_direction = act_upper
+                        break
 
                 # Save both current and previous screen captures to disk
                 try:
