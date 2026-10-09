@@ -95,10 +95,22 @@ python main.py
 ```
 
 ### Useful CLI Options
+- `--backend <gemini|ollama>`: Choose intelligence backend (`gemini` for cloud, `ollama` for 100% free local VLM).
+- `--ollama-model <MODEL>`: Local model ID (defaults to `qwen2.5-vl:7b`).
 - `--max-turns <N>`: Run for a set number of turns (e.g. `python main.py --max-turns 100`).
 - `--no-tts`: Run silently without audio commentary.
 - `--reset-memory`: Reset stored short, medium, and long-term memory back to Pallet Town defaults.
-- `--model <MODEL_ID>`: Override model (defaults to `gemini-2.5-flash`).
+- `--model <MODEL_ID>`: Override Gemini model (defaults to `gemini-3.5-flash`).
+
+### 🦙 Running 100% Free with Local Models (Ollama)
+Pull a Vision-Language Model in Ollama:
+```bash
+ollama run qwen2.5-vl:7b
+```
+Then run YellowAI with zero token costs:
+```bash
+python main.py --backend ollama
+```
 
 ---
 
