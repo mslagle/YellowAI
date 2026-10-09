@@ -326,37 +326,61 @@ NAMING_SCREEN_GUIDANCE = """[KEYBOARD NAMING SCREEN DETECTED - PROFESSOR OAK INT
 You are on the GBA Character Naming Screen!
 
 TOP PRIORITY: CREATE A MEANINGFUL NAME FIRST!
-- DO NOT immediately press START on an empty name!
-- Do NOT worry about leaving the bedroom yet -- you must finish naming your character first!
+- DO NOT worry about leaving the bedroom yet -- you must finish naming your character first!
 - Recommended Names:
   * For Player (boy in red cap / "Your name?"): Choose "RED", "YELLOW", or "ASH".
   * For Rival (boy with spiky hair / "Your rival's name?"): Choose "BLUE" or "GARY".
   * For Pokémon ("Nickname?"): Pick a cool nickname.
 
-KEYBOARD LAYOUT & LETTER GRID (4 ROWS x 7 COLS):
+STRICT DIRECTIVE: NEVER DELETE EXISTING LETTERS!
+- NEVER PRESS B TO BACKSPACE OR DELETE LETTERS!
+- If any letters have been entered (even typos, accidental letters, or 1-2 letters): SIMPLY ACCEPT THE NAME AS-IS!
+- As soon as any characters are entered: press START ('[OK]') immediately to confirm!
+- If the name field is empty: type 1 to 3 letters forward and press START.
+- When Professor Oak asks for confirmation ("Are you OK with this name? Yes / No" or "So your name is [name]?"):
+  * Always press A on "Yes" to accept immediately! NEVER choose "No" and NEVER press B!
+
+KEYBOARD LAYOUT & 2D GRID STRUCTURE (4 ROWS x 7 COLS):
   Row 0: a  b  c    d  e  f    .
   Row 1: g  h  i    j  k  l    ,
-  Row 2: m  n  o    p  q  r    s
+  Row 2: m  n  o    p  q  r    s   <-- 'r' IS ON ROW 2!
   Row 3: t  u  v    w  x  y    z
-- The cursor starts on 'a' (Row 0, Col 0).
-- CONTROLS:
-  * D-Pad (UP, DOWN, LEFT, RIGHT): Navigate between letters on the keyboard.
-  * A Button: Type the highlighted letter ('[Ok]').
-  * B Button: Backspace / delete previous letter ('[BACK] B BUTTON').
-  * SELECT Button: Switch character case ('[others] SELECT▶' toggles upper/lower case).
-  * START Button: Press START ONLY AFTER you have typed your chosen letters to submit [OK]!
+
+CRITICAL 2D GRID NAVIGATION RULES:
+- The keyboard is a 4-ROW VERTICAL GRID, NOT A 1D LINE!
+- DO NOT ONLY PRESS RIGHT! Letters like 'r', 'm', 'n', 'p', 's' are on Row 2; letters like 't', 'u', 'v', 'w', 'x', 'y', 'z' are on Row 3.
+- Pressing RIGHT repeatedly will NEVER reach Row 2 or Row 3! It will only hit the edge of Row 0.
+- YOU MUST PRESS 'DOWN' TO DESCEND TO LOWER ROWS!
+  * From Row 0 to Row 1: Press DOWN 1 time!
+  * From Row 0 to Row 2 (e.g. to reach 'r'): Press DOWN 2 times!
+  * From Row 0 to Row 3: Press DOWN 3 times!
+  * To move back up to higher rows: Press UP!
+
+CONTROLS:
+- D-Pad (UP, DOWN, LEFT, RIGHT): Navigate cursor in 2D space.
+- A Button: Type the highlighted letter ('[Ok]').
+- B Button: Backspace / delete previous letter ('[BACK] B BUTTON').
+- SELECT Button: Switch character case ('[others] SELECT▶' toggles upper/lower case).
+- START Button: Press START ONLY AFTER you have typed your chosen letters to submit [OK]!
 
 STEP-BY-STEP TYPING INSTRUCTIONS:
 1. Navigate with the D-Pad to each letter of your chosen name and press A to type it.
    - Example to type "RED":
-     * Step 1: Move from 'a' (row 0, col 0) to 'r' (row 2, col 5) and press A: actions = ["DOWN", "DOWN", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "A"]
-     * Step 2: Move to 'e' (row 0, col 4) and press A: actions = ["UP", "UP", "LEFT", "A"]
-     * Step 3: Move to 'd' (row 0, col 3) and press A: actions = ["LEFT", "A"]
-     * Step 4: Now that 'RED' is typed, press START to confirm [OK]: actions = ["START"]
+     * Step 1: Move from 'a' (Row 0, Col 0) to 'r' (Row 2, Col 5):
+       You MUST press DOWN twice to reach Row 2, then RIGHT 5 times to reach Col 5, then press A:
+       actions = ["DOWN", "DOWN", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "A"]
+     * Step 2: Move from 'r' (Row 2, Col 5) to 'e' (Row 0, Col 4):
+       Press UP twice to return to Row 0, then LEFT once to reach Col 4, then press A:
+       actions = ["UP", "UP", "LEFT", "A"]
+     * Step 3: Move from 'e' (Row 0, Col 4) to 'd' (Row 0, Col 3):
+       Press LEFT once to reach Col 3, then press A:
+       actions = ["LEFT", "A"]
+     * Step 4: Now that 'RED' is typed, press START to confirm [OK]:
+       actions = ["START"]
    - Example to type "ASH":
-     * Step 1: 'a' is already selected! Press A to type 'a': actions = ["A"]
-     * Step 2: Move to 's' (row 2, col 6) and press A: actions = ["DOWN", "DOWN", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "A"]
-     * Step 3: Move to 'h' (row 1, col 1) and press A: actions = ["UP", "LEFT", "LEFT", "LEFT", "LEFT", "LEFT", "A"]
+     * Step 1: 'a' is already selected at (0, 0)! Press A: actions = ["A"]
+     * Step 2: Move to 's' (Row 2, Col 6): actions = ["DOWN", "DOWN", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "A"]
+     * Step 3: Move to 'h' (Row 1, Col 1): actions = ["UP", "LEFT", "LEFT", "LEFT", "LEFT", "LEFT", "A"]
      * Step 4: Now press START to submit: actions = ["START"]
 2. CONFIRMATION POPUP ("Are you OK with this name? Yes / No"):
    - When Professor Oak asks for confirmation, cursor defaults to 'Yes'. Press A to confirm: actions = ["A"]!"""

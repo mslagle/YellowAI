@@ -102,7 +102,8 @@ class OllamaPlayer:
         self,
         turn_id: int,
         image: Image.Image,
-        memory_context: str,
+        memory_context: str = "",
+        previous_image: Optional[Image.Image] = None,
         active_quest: Optional[str] = None,
         action_history: str = "",
         stuck_alert: str = "",
@@ -131,10 +132,17 @@ class OllamaPlayer:
             battle_advisor_prompt=battle_advisor_prompt
         )
 
-        # Convert PIL image to base64 JPEG
+        # Convert PIL current image to base64 JPEG
         img_buffer = io.BytesIO()
         image.save(img_buffer, format="JPEG", quality=85)
         img_b64 = base64.b64encode(img_buffer.getvalue()).decode("utf-8")
+
+        images_list = []
+        if previous_image is not None:
+            prev_buffer = io.BytesIO()
+            previous_image.save(prev_buffer, format="JPEG", quality=85)
+            images_list.append(base64.b64encode(prev_buffer.getvalue()).decode("utf-8"))
+        images_list.append(img_b64)
 
         payload = {
             "model": self.model_id,
@@ -146,7 +154,7 @@ class OllamaPlayer:
                 {
                     "role": "user",
                     "content": prompt_text,
-                    "images": [img_b64]
+                    "images": images_list
                 }
             ],
             "format": schema_cls.model_json_schema(),

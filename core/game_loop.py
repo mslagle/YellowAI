@@ -26,6 +26,7 @@ from config import (
     EMULATOR_WINDOW_TITLE_KEYWORDS,
     GEMINI_THINKING_BUDGET,
     LAST_CAPTURE_FILE,
+    PREVIOUS_CAPTURE_FILE,
     ENABLE_RESCUE_THINKING,
     RESCUE_THINKING_BUDGET,
     RESCUE_ENABLE_WEB_SEARCH,
@@ -111,22 +112,165 @@ class GameLoop:
         self.in_battle: bool = False
         self.current_opponent: Optional[str] = None
         self.battle_advisor_given_for_opponent: Optional[str] = None
+        self.previous_frame: Optional[Image.Image] = None
 
     def _is_naming_screen(self, frame: Image.Image) -> bool:
-        """Visual check for the GBA Gen 3 / Recharged Yellow naming keyboard screen."""
+        """Visual check for the GBA Gen 3 / Recharged Yellow naming keyboard screen in all modes (Upper/Lower/Symbols)."""
         try:
             import numpy as np
             resized = frame.resize((480, 320))
             arr = np.array(resized)
             # 1. Top banner: blue header band
             top_blue = np.mean((arr[5:20, 10:200, 0] < 50) & (arr[5:20, 10:200, 1] > 70) & (arr[5:20, 10:200, 2] > 180))
-            # 2. Tan/peach keyboard container
-            keyboard_tan = np.mean((arr[160:280, 50:350, 0] > 160) & (arr[160:280, 50:350, 1] > 110) & (arr[160:280, 50:350, 2] < 160))
+            # 2. White name card in upper half
+            white_card = np.mean((arr[60:120, 120:380, 0] > 230) & (arr[60:120, 120:380, 1] > 230) & (arr[60:120, 120:380, 2] > 230))
             # 3. Yellow OK button at bottom-right
             ok_yellow = np.mean((arr[250:290, 390:460, 0] > 180) & (arr[250:290, 390:460, 1] > 170) & (arr[250:290, 390:460, 2] < 140))
-            return bool(top_blue > 0.35 and keyboard_tan > 0.45 and ok_yellow > 0.05)
+            return bool(top_blue > 0.35 and white_card > 0.45 and ok_yellow > 0.05)
         except Exception:
             return False
+
+    def _get_naming_keyboard_advice(self, arr, who: str, target_name: str) -> str:
+        """Analyzes active cursor position, name field capacity, and computes 2D D-pad path."""
+        import numpy as np
+
+        # 1. Detect GBA cream/ivory cursor ring (RGB555 converted to RGB888: 255, 244, 224)
+        ring = (arr[:, :, 0] >= 253) & (arr[:, :, 1] >= 242) & (arr[:, :, 1] <= 247) & (arr[:, :, 2] >= 222) & (arr[:, :, 2] <= 227)
+        ys, xs = np.where(ring)
+        if len(ys) > 40:
+            cy = int(np.mean(ys))
+            cx = int(np.mean(xs))
+        else:
+            # Fallback pure white
+            pure_white = (arr[150:310, 50:370, 0] > 240) & (arr[150:310, 50:370, 1] > 240) & (arr[150:310, 50:370, 2] > 240)
+            ys, xs = np.where(pure_white)
+            if len(ys) > 40:
+                cy = 150 + int(np.mean(ys))
+                cx = 50 + int(np.mean(xs))
+            else:
+                cy, cx = 180, 77
+
+        if cx > 380:
+            if cy < 200:
+                best_r, best_c = 0, 8
+                curr_char = "[others] (case toggle on right)"
+            elif cy < 250:
+                best_r, best_c = 1, 8
+                curr_char = "[BACK] (delete/backspace on right)"
+            else:
+                best_r, best_c = 3, 8
+                curr_char = "[OK] (confirm on bottom right)"
+            curr_pos_desc = curr_char
+        else:
+
+            # Determine Row (0..3)
+            if cy < 198:
+                best_r = 0
+            elif cy < 230:
+                best_r = 1
+            elif cy < 260:
+                best_r = 2
+            else:
+                best_r = 3
+
+            # Determine Col (0..7)
+            if cx < 89:
+                best_c = 0
+            elif cx < 113:
+                best_c = 1
+            elif cx < 155:
+                best_c = 2
+            elif cx < 201:
+                best_c = 3
+            elif cx < 225:
+                best_c = 4
+            elif cx < 249:
+                best_c = 5
+            elif cx < 290:
+                best_c = 6
+            else:
+                best_c = 7
+
+            grid = [
+                ['A', 'B', 'C', 'D', 'E', 'F', 'F', '.'],
+                ['G', 'H', 'I', 'J', 'K', 'L', 'L', ','],
+                ['M', 'N', 'O', 'P', 'Q', 'R', 'S', 'S'],
+                ['T', 'U', 'V', 'W', 'X', 'Y', 'Z', '[Space]'],
+            ]
+            curr_char = grid[best_r][best_c]
+            curr_pos_desc = f"'{curr_char}' (Row {best_r}, Col {best_c})"
+
+        # 2. Name field character density analysis (character slots start at x=192)
+        slot_counts = []
+        for slot in range(7):
+            x1 = 192 + slot * 20
+            x2 = x1 + 20
+            patch = arr[98:115, x1:x2]
+            dark = int(np.sum(np.mean(patch < 120, axis=2) > 0.5))
+            slot_counts.append(dark)
+
+        num_chars = sum(1 for c in slot_counts if c > 20)
+        is_full = (num_chars >= 7) or (sum(slot_counts) > 280)
+        has_chars = num_chars > 0
+
+        # 3. Path calculation to next target letter
+        char_coords = {
+            'A': (0, 0), 'B': (0, 1), 'C': (0, 2), 'D': (0, 3), 'E': (0, 4), 'F': (0, 5),
+            'G': (1, 0), 'H': (1, 1), 'I': (1, 2), 'J': (1, 3), 'K': (1, 4), 'L': (1, 5),
+            'M': (2, 0), 'N': (2, 1), 'O': (2, 2), 'P': (2, 3), 'Q': (2, 4), 'R': (2, 5), 'S': (2, 6),
+            'T': (3, 0), 'U': (3, 1), 'V': (3, 2), 'W': (3, 3), 'X': (3, 4), 'Y': (3, 5), 'Z': (3, 6)
+        }
+
+        # Next letter in target name
+        target_char = target_name[0]
+        target_r, target_c = char_coords.get(target_char, (2, 5))
+
+        moves = []
+        if best_r == 3 and best_c == 7:  # on [Space] at bottom-right
+            moves = ['UP', 'LEFT']
+        elif best_c == 8:  # on right-side action buttons
+            moves = ['LEFT'] + ['UP'] * max(0, best_r - target_r) + ['DOWN'] * max(0, target_r - best_r)
+        else:
+            dr = target_r - best_r
+            dc = target_c - best_c
+            if dr > 0:
+                moves.extend(['DOWN'] * dr)
+            elif dr < 0:
+                moves.extend(['UP'] * abs(dr))
+            if dc > 0:
+                moves.extend(['RIGHT'] * dc)
+            elif dc < 0:
+                moves.extend(['LEFT'] * abs(dc))
+
+        recommended_batch = moves + ['A'] if moves else ['A']
+
+        lines = [
+            "[KEYBOARD STATE & 2D NAVIGATION ADVISOR]:",
+            f"- Target Character: {who} -> Chosen Name: '{target_name}'",
+            f"- Active Cursor: Currently highlighting {curr_pos_desc}"
+        ]
+
+        if has_chars:
+            lines.extend([
+                f"- Name Field Status: Text entered (~{num_chars} characters present).",
+                "- STRICT DIRECTIVE: NEVER DELETE EXISTING LETTERS! Simply accept whatever name is entered!",
+                "- ACTION: Press START immediately to confirm [OK]! Do NOT try to fix typos or backspace!",
+                "- Recommended actions: ['START']"
+            ])
+        else:
+            lines.extend([
+                f"- Name Field Status: Empty/Blank (ready to type '{target_name}').",
+                "- STRICT DIRECTIVE: Type letters forward -- NEVER press B to backspace! Simply accept any letters you type!",
+                f"- Next target letter '{target_char}' is at Row {target_r}, Col {target_c}.",
+                f"  CRITICAL 2D GRID RULE: Letter '{target_char}' is on ROW {target_r}! You CANNOT reach it by only pressing RIGHT!"
+            ])
+            if 'UP' in moves:
+                lines.append(f"  You MUST press UP to ascend toward Row {target_r}!")
+            elif 'DOWN' in moves:
+                lines.append(f"  You MUST press DOWN to descend toward Row {target_r}!")
+            lines.append(f"  Recommended actions to reach and type '{target_char}': {recommended_batch}")
+            lines.append(f"- As soon as any letter is entered, press START to confirm [OK]!")
+        return "\n".join(lines)
 
     def _detect_screen_mode(self, frame: Image.Image) -> str:
         """Lightweight screen mode hint to streamline Gemini prompt focus."""
@@ -140,6 +284,8 @@ class GameLoop:
                 target_name = "RED" if has_red_cap else "BLUE"
                 print(f"[Screen Mode Detected] Naming Keyboard Screen -> Naming {who}!")
 
+                naming_advisor = self._get_naming_keyboard_advice(arr, who, target_name)
+
                 # Dynamically align quest priorities with character naming
                 prio = (self.memory_manager.priority_quest or "").lower()
                 if "bedroom" in prio or "mom" in prio or not prio:
@@ -147,7 +293,7 @@ class GameLoop:
                     self.memory_manager.current_area = "Intro: Character Naming Screen"
                     self.memory_manager.update_micro_step(f"Type '{target_name}' on keyboard")
 
-                return f"{NAMING_SCREEN_GUIDANCE}\n\n[DETECTED TARGET]: You are currently naming the {who.upper()}! Choose a name like '{target_name}' and type it before confirming."
+                return f"{NAMING_SCREEN_GUIDANCE}\n\n{naming_advisor}"
             except Exception:
                 return NAMING_SCREEN_GUIDANCE
 
@@ -261,7 +407,10 @@ class GameLoop:
                 print(f"\n--- [TURN {self.turn_id}] ---")
 
                 # 5. Evaluate movement from previous turn and build action history
-                is_stuck, stuck_alert = self.anti_stuck.evaluate_frame(thumb)
+                is_naming = self._is_naming_screen(frame)
+                is_stuck, stuck_alert = self.anti_stuck.evaluate_frame(
+                    thumb, is_menu_or_naming=is_naming, current_area=self.memory_manager.current_area
+                )
                 repeated_a, repeat_alert = self.anti_stuck.check_repeated_action("A", threshold=3)
                 if repeated_a and repeat_alert:
                     stuck_alert = f"{stuck_alert}\n{repeat_alert}" if stuck_alert else repeat_alert
@@ -354,6 +503,7 @@ class GameLoop:
                     decision = self.gemini_player.decide_action(
                         turn_id=self.turn_id,
                         image=frame,
+                        previous_image=self.previous_frame,
                         memory_context=memory_prompt,
                         active_quest=self.memory_manager.active_quest,
                         action_history=action_history_prompt,
@@ -457,6 +607,12 @@ class GameLoop:
                 else:
                     flat_actions = decision.get("flat_actions", [button])
 
+                if is_naming:
+                    # Enforce directive: NEVER delete existing letters on the naming screen!
+                    if any(btn == "B" for btn in flat_actions):
+                        print("[Naming Guard] Directive active: Never delete existing letters! Intercepting 'B' and confirming with START.")
+                        flat_actions = ["START"]
+
                 # 9. Multi-Action Batch Execution with Reactive Interrupt Watchdog
                 executed_actions: List[str] = []
                 interrupted_reason: Optional[str] = None
@@ -480,17 +636,23 @@ class GameLoop:
                     if step_frame is not None and step_thumb is not None:
                         latest_frame = step_frame
 
-                        # Check if this step should interrupt subsequent actions
-                        step_interrupted, interrupt_why = self.anti_stuck.check_step_interrupt(
-                            btn, current_step_thumb, step_thumb
-                        )
-                        step_outcome = "BLOCKED" if (step_interrupted and "COLLISION" in interrupt_why) else "MOVED"
-                        self.anti_stuck.record_action(self.turn_id, btn, reasoning, outcome=step_outcome)
+                        if is_naming:
+                            # Bypass collision interrupts completely on the naming screen
+                            step_interrupted = False
+                            interrupt_why = None
+                            self.anti_stuck.record_action(self.turn_id, btn, reasoning, outcome="MOVED")
+                        else:
+                            # Check if this step should interrupt subsequent actions
+                            step_interrupted, interrupt_why = self.anti_stuck.check_step_interrupt(
+                                btn, current_step_thumb, step_thumb
+                            )
+                            step_outcome = "BLOCKED" if (step_interrupted and "COLLISION" in interrupt_why) else "MOVED"
+                            self.anti_stuck.record_action(self.turn_id, btn, reasoning, outcome=step_outcome)
 
-                        if step_interrupted and step_idx < len(flat_actions):
-                            interrupted_reason = interrupt_why
-                            print(f"[Interrupt Watchdog] Step {step_idx}/{len(flat_actions)} [{btn}] -> {interrupt_why}. Halting remaining batch steps.")
-                            break
+                            if step_interrupted and step_idx < len(flat_actions):
+                                interrupted_reason = interrupt_why
+                                print(f"[Interrupt Watchdog] Step {step_idx}/{len(flat_actions)} [{btn}] -> {interrupt_why}. Halting remaining batch steps.")
+                                break
 
                         current_step_thumb = step_thumb
                     else:
@@ -500,11 +662,14 @@ class GameLoop:
                 if len(executed_actions) > 1:
                     print(f"[Batch Executed]: [{action_summary}] ({len(executed_actions)} steps)")
 
-                # Save the latest screen capture
+                # Save both current and previous screen captures to disk
                 try:
+                    if self.previous_frame is not None:
+                        self.previous_frame.save(PREVIOUS_CAPTURE_FILE)
                     latest_frame.save(LAST_CAPTURE_FILE)
                 except Exception:
                     pass
+                self.previous_frame = latest_frame
 
                 # 10. Process Cadence Triggers
                 if thought:

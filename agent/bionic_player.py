@@ -119,7 +119,8 @@ class BionicPlayer:
         self,
         turn_id: int,
         image: Image.Image,
-        memory_context: str,
+        previous_image: Optional[Image.Image] = None,
+        memory_context: str = "",
         active_quest: Optional[str] = None,
         action_history: str = "",
         stuck_alert: str = "",
@@ -146,11 +147,27 @@ class BionicPlayer:
             battle_advisor_prompt=battle_advisor_prompt
         )
 
-        # Convert PIL image to base64 JPEG
+        # Convert PIL current image to base64 JPEG
         img_buffer = io.BytesIO()
         image.save(img_buffer, format="JPEG", quality=85)
         img_b64 = base64.b64encode(img_buffer.getvalue()).decode("utf-8")
         data_uri = f"data:image/jpeg;base64,{img_b64}"
+
+        user_content = []
+        if previous_image is not None:
+            prev_buffer = io.BytesIO()
+            previous_image.save(prev_buffer, format="JPEG", quality=85)
+            prev_b64 = base64.b64encode(prev_buffer.getvalue()).decode("utf-8")
+            user_content.extend([
+                {"type": "text", "text": "[PREVIOUS SCREENSHOT (Before last turn's actions)]:"},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{prev_b64}"}}
+            ])
+
+        user_content.extend([
+            {"type": "text", "text": "[CURRENT SCREENSHOT (Live game state to act upon)]:"},
+            {"type": "image_url", "image_url": {"url": data_uri}},
+            {"type": "text", "text": prompt_text}
+        ])
 
         schema_json = schema_cls.model_json_schema()
         system_msg = f"{SYSTEM_INSTRUCTION}\nYou MUST respond STRICTLY in valid JSON matching this schema:\n{json.dumps(schema_json)}"
@@ -163,10 +180,7 @@ class BionicPlayer:
             },
             {
                 "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt_text},
-                    {"type": "image_url", "image_url": {"url": data_uri}}
-                ]
+                "content": user_content
             },
             {
                 "role": "assistant",

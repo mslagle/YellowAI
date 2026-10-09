@@ -25,6 +25,7 @@ MEMORY_FILE = STATE_DIR / "session_memory.json"
 OVERLAY_STATE_FILE = OVERLAY_DIR / "overlay_state.json"
 OVERLAY_JS_FILE = OVERLAY_DIR / "overlay_state.js"
 LAST_CAPTURE_FILE = LOGS_DIR / "last_capture.png"
+PREVIOUS_CAPTURE_FILE = LOGS_DIR / "previous_capture.png"
 
 # Emulator Window Configuration
 # mGBA title format is typically "mGBA - [Rom Name]" or "mGBA"

@@ -35,7 +35,7 @@ class AntiStuckWatchdog:
         emergency_threshold: int = 8,
         diff_threshold: float = 3.0,
         max_history: int = 20,
-        warp_diff_threshold: float = 28.0
+        warp_diff_threshold: float = 60.0
     ):
         self.threshold_consecutive = threshold_consecutive
         self.emergency_threshold = emergency_threshold
@@ -68,7 +68,8 @@ class AntiStuckWatchdog:
         self,
         button: str,
         prev_thumb: Optional[np.ndarray],
-        curr_thumb: Optional[np.ndarray]
+        curr_thumb: Optional[np.ndarray],
+        is_menu_or_naming: bool = False
     ) -> Tuple[bool, Optional[str]]:
         """
         Evaluates an immediate step within a multi-action batch.
@@ -83,19 +84,27 @@ class AntiStuckWatchdog:
         mean_val = float(np.mean(curr_thumb))
 
         # 1. Doorway warp or battle encounter flash/fade
-        if diff >= self.warp_diff_threshold or mean_val < 12.0:
+        if not is_menu_or_naming and (diff >= self.warp_diff_threshold or mean_val < 12.0):
             if btn in OPPOSITE_DIRECTIONS:
                 self.doorway_warp_turns = 2
                 self.last_warp_direction = btn
             return True, f"SCENE_WARP_OR_BATTLE (diff={diff:.1f})"
 
         # 2. Collision / Wall hit on directional movement
-        if btn in OPPOSITE_DIRECTIONS and diff < self.diff_threshold:
+        # On menus and keyboard naming screens, moving a cursor produces subtle changes (diff ~0.3 - 1.5).
+        # A true wall bump or edge collision means zero visual difference (< 0.20).
+        step_threshold = 0.20 if is_menu_or_naming else 0.35
+        if btn in OPPOSITE_DIRECTIONS and diff < step_threshold:
             return True, f"COLLISION_BLOCKED (button={btn}, diff={diff:.2f})"
 
         return False, None
 
-    def evaluate_frame(self, current_thumb: Optional[np.ndarray]) -> Tuple[bool, Optional[str]]:
+    def evaluate_frame(
+        self,
+        current_thumb: Optional[np.ndarray],
+        is_menu_or_naming: bool = False,
+        current_area: str = ""
+    ) -> Tuple[bool, Optional[str]]:
         """
         Evaluates the newly captured frame against the previous frame.
         Updates the outcome of the most recent action record (MOVED vs BLOCKED).
@@ -112,9 +121,10 @@ class AntiStuckWatchdog:
             last_record = self.history[-1]
             if self.last_thumb is not None:
                 diff = float(np.mean(np.abs(current_thumb.astype(float) - self.last_thumb.astype(float))))
+                turn_thresh = 0.20 if is_menu_or_naming else self.diff_threshold
                 if last_record.button.upper() == "WAIT":
                     last_record.outcome = "WAIT"
-                elif diff < self.diff_threshold:
+                elif diff < turn_thresh:
                     last_record.outcome = "BLOCKED"
                     self.consecutive_stuck_turns += 1
                 else:
@@ -122,8 +132,10 @@ class AntiStuckWatchdog:
                     self.consecutive_stuck_turns = 0
 
                     # Strategy 5: Detect doorway warp transition (major scene change or fade)
+                    # Never trigger in upstairs rooms (bedroom, 2F) where no south doorway exits exist!
+                    is_upstairs = any(x in current_area.lower() for x in ["bedroom", "2f", "3f", "roof", "naming"])
                     btn = last_record.button.upper()
-                    if btn in OPPOSITE_DIRECTIONS and (diff >= self.warp_diff_threshold or np.mean(current_thumb) < 15.0):
+                    if not is_upstairs and btn in OPPOSITE_DIRECTIONS and (diff >= self.warp_diff_threshold or np.mean(current_thumb) < 15.0):
                         self.doorway_warp_turns = 2
                         self.last_warp_direction = btn
             else:

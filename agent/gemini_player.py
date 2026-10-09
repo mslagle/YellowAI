@@ -176,7 +176,8 @@ class GeminiPlayer:
         self,
         turn_id: int,
         image: Image.Image,
-        memory_context: str,
+        previous_image: Optional[Image.Image] = None,
+        memory_context: str = "",
         active_quest: Optional[str] = None,
         action_history: str = "",
         stuck_alert: str = "",
@@ -205,13 +206,28 @@ class GeminiPlayer:
             battle_advisor_prompt=battle_advisor_prompt
         )
 
-        # Convert PIL image to JPEG bytes
+        # Convert PIL current image to JPEG bytes
         img_byte_arr = io.BytesIO()
         image.save(img_byte_arr, format='JPEG', quality=85)
         image_part = types.Part.from_bytes(
             data=img_byte_arr.getvalue(),
             mime_type="image/jpeg"
         )
+
+        contents = []
+        if previous_image is not None:
+            prev_byte_arr = io.BytesIO()
+            previous_image.save(prev_byte_arr, format='JPEG', quality=85)
+            prev_part = types.Part.from_bytes(
+                data=prev_byte_arr.getvalue(),
+                mime_type="image/jpeg"
+            )
+            contents.append("[PREVIOUS SCREENSHOT (Before last turn's actions)]:")
+            contents.append(prev_part)
+
+        contents.append("[CURRENT SCREENSHOT (Live game state to act upon)]:")
+        contents.append(image_part)
+        contents.append(prompt_text)
 
         try:
             config_params = {
@@ -231,7 +247,7 @@ class GeminiPlayer:
 
             response = self.client.models.generate_content(
                 model=self.model_id,
-                contents=[prompt_text, image_part],
+                contents=contents,
                 config=config,
             )
 
