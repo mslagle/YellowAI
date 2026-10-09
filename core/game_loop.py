@@ -46,7 +46,9 @@ from agent.gemini_player import GeminiPlayer
 from agent.prompts import BATTLE_TACTICAL_GUIDANCE
 from core.memory_manager import MemoryManager
 from core.anti_stuck import AntiStuckWatchdog, OPPOSITE_DIRECTIONS
-from core.poi_detector import POIDetector
+from core.screen_analyzer import ScreenAnalyzer
+from core.movement_controller import MovementController
+from core.battle_controller import BattleController
 from tts.audio_queue import AudioQueueManager
 from overlay.server import OverlayServer
 
@@ -103,7 +105,22 @@ class GameLoop:
                 thinking_budget=thinking_budget
             )
         self.anti_stuck = AntiStuckWatchdog(threshold_consecutive=ANTI_STUCK_CONSECUTIVE_THRESHOLD)
-        self.poi_detector = POIDetector(target_width=CAPTURE_TARGET_WIDTH, target_height=CAPTURE_TARGET_HEIGHT)
+        
+        # Dual-Tier Perception & Movement Controllers
+        self.screen_analyzer = ScreenAnalyzer(
+            target_width=CAPTURE_TARGET_WIDTH,
+            target_height=CAPTURE_TARGET_HEIGHT,
+            debug_poi_path="logs/last_poi_annotated.png"
+        )
+        self.movement_controller = MovementController(
+            input_controller=self.input_controller,
+            screen_capture=self.screen_capture,
+            step_settle_delay=self.step_settle_delay,
+            route_debug_path="logs/last_route_planned.png"
+        )
+        self.battle_controller = BattleController(
+            input_controller=self.input_controller
+        )
         
         self.enable_tts = enable_tts
         self.audio_queue = AudioQueueManager() if enable_tts else None
@@ -133,98 +150,20 @@ class GameLoop:
         except Exception:
             return False
 
-    def _is_bedroom(self, frame: Image.Image) -> bool:
-        """Detects if the player is in Red's 2F bedroom upstairs surrounded by black void."""
-        try:
-            resized = frame.resize((480, 320))
-            arr = np.array(resized)
-            black_bottom = np.mean(arr[200:, :, :] < 20) > 0.8
-            upper = arr[:160, 160:480]
-            tatami = (upper[:, :, 0] > 140) & (upper[:, :, 1] > 120) & (upper[:, :, 2] < 110)
-            rug = (upper[:, :, 0] < 130) & (upper[:, :, 1] > 140) & (upper[:, :, 2] > 70)
-            has_bedroom_floor = (np.mean(tatami) + np.mean(rug)) > 0.35
-            return black_bottom and has_bedroom_floor
-        except Exception:
-            return False
+    def _detect_screen_mode(self, frame: Image.Image) -> Tuple[Any, str]:
+        """Analyzes frame via NumPy ScreenAnalyzer and generates grounded prompt with POIs."""
+        scene = self.screen_analyzer.analyze(frame, current_area_hint=self.memory_manager.current_area)
+        self.memory_manager.current_area = scene.area_description
 
-    def _get_bedroom_advice(self, frame: Image.Image) -> str:
-        """Provides precise visual grid advice to escape Red's bedroom to the stairs."""
-        try:
-            resized = frame.resize((480, 320))
-            arr = np.array(resized)
-            cap = (arr[:, :, 0] > 175) & (arr[:, :, 1] < 105) & (arr[:, :, 2] < 105)
-            y_idx, x_idx = np.where(cap)
-            if len(y_idx) == 0:
-                return (
-                    "[RED'S BEDROOM (2F) ADVISOR]:\n"
-                    "- The bottom of the room is surrounded by BLACK VOID. DO NOT press DOWN!\n"
-                    "- The stairs to 1F are in the FAR TOP-RIGHT corner. Walk RIGHT to Col 9, then walk UP into the stairs!"
-                )
-            py = int(np.median(y_idx))
-            px = int(np.median(x_idx))
-            col = max(0, min(9, (px - 160) // 32))
-            row = max(0, min(5, py // 32))
-            steps_right = max(0, 9 - col)
-
-            is_west_void = np.mean(arr[py-10:py+10, max(0, px-40):max(1, px-15)] < 20) > 0.8
-            is_south_void = np.mean(arr[min(319, py+15):min(320, py+35), max(0, px-10):min(480, px+10)] < 20) > 0.8
-
-            lines = [
-                "[RED'S BEDROOM (2F) NAVIGATION ADVISOR]:",
-                f"- Player Position: Col {col}/9, Row {row}/5 (X={px}, Y={py}).",
-                "- CRITICAL VOID BORDERS: This is an upstairs room surrounded by black void.",
-            ]
-            if is_west_void:
-                lines.append("  * WEST VOID DEAD END: You are standing against the WEST WALL / BLACK VOID! DO NOT PRESS LEFT! There is NO door to the left!")
-            if is_south_void:
-                lines.append("  * SOUTH VOID DEAD END: You are standing against the SOUTH WALL / BLACK VOID! DO NOT PRESS DOWN! There is NO door to the south!")
-
-            lines.extend([
-                "- OBJECTIVE & EXIT: The ONLY exit downstairs to 1F is the STAIRCASE in the FAR TOP-RIGHT corner (Col 9)!",
-                "  * Safety Railing: Cols 7-8 have a white staircase railing along the top that blocks moving UP.",
-                "  * Stairs Landing: Walk EAST (RIGHT) across the room to Col 9, then walk NORTH (UP) to descend the stairs!"
-            ])
-
-            if col < 9:
-                actions = ["RIGHT"] * min(steps_right, 4)
-                lines.append(f"- Recommended Action: Walk RIGHT toward center/east of room -> actions = {actions}")
-            else:
-                lines.append("- Recommended Action: You have reached Col 9! Walk UP into the staircase landing -> actions = ['UP', 'UP']")
-            return "\n".join(lines)
-        except Exception:
-            return "[RED'S BEDROOM (2F) ADVISOR]: Walk RIGHT to top-right corner (Col 9), then walk UP to go downstairs."
-
-    def _detect_screen_mode(self, frame: Image.Image) -> str:
-        """Lightweight screen mode hint to streamline Gemini prompt focus."""
-        if self._is_naming_screen(frame):
-            print("[Screen Mode Detected] Naming Keyboard Screen -> Waiting for user to complete naming.")
-            return "NAMING SCREEN: User is entering character name manually. Return actions = ['WAIT']."
-
-        # Check if in Red's upstairs bedroom
-        if self._is_bedroom(frame):
-            self.memory_manager.current_area = "Pallet Town (Red's Bedroom)"
-            if "bedroom" not in (self.memory_manager.priority_quest or "").lower():
-                self.memory_manager.set_priority_quest("Leave Red's bedroom, go downstairs, and talk to Mom")
-            return self._get_bedroom_advice(frame)
-
-        # If we just left the naming screen, transition back to bedroom/Pallet Town quest
-        if self.memory_manager.current_area == "Intro: Character Naming Screen":
-            print("[Game Transition] Naming completed! Entering Red's bedroom (2F).")
-            self.memory_manager.current_area = "Pallet Town (Red's Bedroom)"
+        # Transition quests upon leaving naming screen
+        if scene.area_type == "BEDROOM_2F" and "bedroom" not in (self.memory_manager.priority_quest or "").lower():
             self.memory_manager.set_priority_quest("Leave Red's bedroom, go downstairs, and talk to Mom")
-            self.memory_manager.update_micro_step("Walk UP and RIGHT to staircase in top-right corner to go downstairs")
 
-        micro = (self.memory_manager.micro_step or "").lower()
-        area = self.memory_manager.current_area.lower()
-        if self.in_battle or "battle" in micro or "fight" in micro or "wild" in micro or "catch" in micro:
-            return "BATTLE MODE: Check move PP (PP xx/xx). NEVER select a 0-PP move! If 'There\'s no PP left for this move!' is on screen, press A/B to clear, then press RIGHT or DOWN to pick a DIFFERENT move slot, switch Pokémon, or RUN!"
-        if "mart" in area or "buy" in micro or "shop" in micro or "clerk" in micro or "quit" in micro:
-            return "SHOP/MENU MODE: If on clerk menu (Buy/Sell/Quit) or done shopping, press DOWN to highlight 'Quit' and press A to exit! DO NOT press A on 'Buy'!"
+        if scene.is_battle or self.in_battle:
+            self.in_battle = True
 
-        # Extract real-time POIs via fast NumPy spatial detection
-        poi_analysis = self.poi_detector.analyze_frame(frame, current_area=self.memory_manager.current_area)
-        poi_prompt = self.poi_detector.format_poi_prompt(poi_analysis)
-        return f"OVERWORLD NAVIGATION\n\n{poi_prompt}"
+        prompt = self.screen_analyzer.format_grounded_prompt(scene)
+        return scene, prompt
 
     def _export_overlay_state(self, action: str, thought: Optional[str] = None):
         """Exports the latest state to JSON for OBS browser source overlay."""
@@ -308,6 +247,8 @@ class GameLoop:
                     print("\n[SAFEGUARD TRIGGERED] Failed to capture frame from emulator.")
                     print("Gemini API call canceled. Stopping game loop.")
                     break
+
+                latest_frame = frame
 
                 # Save the latest screen capture to where logs are stored
                 try:
@@ -400,13 +341,13 @@ class GameLoop:
                         "cadence_tag": cadence
                     }
                 else:
-                    # 7. Call Gemini with action history, active quest, mode hint, and stuck alerts
-                    mode_hint = self._detect_screen_mode(frame)
+                    # 7. Analyze screen via NumPy ScreenAnalyzer and build grounded prompt
+                    scene, mode_hint = self._detect_screen_mode(frame)
 
                     # Check for Battle Opening / Enemy Pokémon Switch Thinking Budget
                     trigger_battle_thinking = False
                     battle_advisor_prompt = ""
-                    if ENABLE_BATTLE_THINKING and "BATTLE" in mode_hint:
+                    if ENABLE_BATTLE_THINKING and (scene.is_battle or "BATTLE" in mode_hint):
                         if not self.in_battle or (self.current_opponent and self.current_opponent != self.battle_advisor_given_for_opponent):
                             trigger_battle_thinking = True
                             battle_advisor_prompt = BATTLE_TACTICAL_GUIDANCE
@@ -429,14 +370,17 @@ class GameLoop:
                     )
                     api_duration = time.time() - api_start
 
-                    button = decision.get("button", "WAIT")
-                    flat_actions = decision.get("flat_actions", [button])
+                    intent = decision.get("intent", "EXIT_ROOM")
+                    target_poi = decision.get("target_poi")
+                    battle_action = decision.get("battle_action")
+                    move_slot = decision.get("move_slot")
+                    target_item = decision.get("target_item")
+                    switch_target_slot = decision.get("switch_target_slot")
                     reasoning = decision.get("reasoning", "")
                     thought = decision.get("thought", None)
                     cadence = decision.get("cadence_tag", "")
 
-                    plan_str = " -> ".join(flat_actions) if len(flat_actions) > 1 else button
-                    print(f"Action Plan: [{plan_str}] | Reason: '{reasoning}' (Cadence: {cadence})")
+                    print(f"Strategic Decision: Intent=[{intent}] Target=[{target_poi or 'N/A'}] | Reason: '{reasoning}' (Cadence: {cadence})")
 
                 # Update Battle Tracking & Enemy Changes
                 opp = decision.get("opponent_pokemon")
@@ -448,9 +392,9 @@ class GameLoop:
                         self.current_opponent = opp_clean
                     if trigger_battle_thinking:
                         self.battle_advisor_given_for_opponent = opp_clean
-                elif "BATTLE" in mode_hint and not self.in_battle:
+                elif (scene.is_battle or "BATTLE" in mode_hint) and not self.in_battle:
                     self.in_battle = True
-                elif "OVERWORLD" in mode_hint and self.in_battle:
+                elif not scene.is_battle and "OVERWORLD" in mode_hint and self.in_battle:
                     print("[Battle Concluded] Returning to Overworld navigation.")
                     self.in_battle = False
                     self.current_opponent = None
@@ -496,110 +440,55 @@ class GameLoop:
                         self.memory_manager.update_micro_step(micro_s.strip())
                         print(f"[Micro-Step Updated]: '{micro_s.strip()}'")
 
-                # Fallback support for legacy active_command field
-                active_cmd = decision.get("active_command")
-                if active_cmd and isinstance(active_cmd, str) and active_cmd.strip():
-                    if active_cmd.strip().upper() == "COMPLETED":
-                        if self.memory_manager.priority_quest:
-                            self.memory_manager.complete_quest(self.memory_manager.priority_quest)
-                    elif active_cmd.strip().upper() != "NULL":
-                        self.memory_manager.add_quest(active_cmd.strip(), is_priority=True)
-
                 # Event-driven memory sync on doorway transitions
                 if self.anti_stuck.doorway_warp_turns == 2:
                     self.memory_manager.save()
 
-                # 8. Emergency Menu Escape failsafe ONLY if stuck for extreme duration (8+ turns)
-                if self.anti_stuck.is_emergency_stuck():
-                    if self._is_naming_screen(frame):
-                        print(f"[Watchdog Emergency] Stuck on Naming Screen after {self.anti_stuck.consecutive_stuck_turns} turns. Pressing START to confirm [OK]!")
-                        flat_actions = ["START"]
-                    else:
-                        print(f"[Watchdog Emergency] Still stuck after {self.anti_stuck.consecutive_stuck_turns} turns. Triggering emergency escape!")
-                        self.input_controller.emergency_menu_escape(3, try_move_away=True)
-                        flat_actions = ["UP"]
-                else:
-                    flat_actions = decision.get("flat_actions", [button])
-
-                if is_naming:
-                    print("[Naming Screen] Waiting for user to complete character naming.")
-                    flat_actions = ["WAIT"]
-                elif not self.in_battle and flat_actions:
-                    # Physical Void Guard: If character is against a black void wall and attempts to move into it,
-                    # override immediately towards open center of room.
-                    first_btn = flat_actions[0].upper().strip()
-                    try:
-                        arr_check = np.array(frame.resize((480, 320)))
-                        cap_m = (arr_check[:, :, 0] > 175) & (arr_check[:, :, 1] < 105) & (arr_check[:, :, 2] < 105)
-                        cy_i, cx_i = np.where(cap_m)
-                        if len(cy_i) > 0:
-                            py_i, px_i = int(np.median(cy_i)), int(np.median(cx_i))
-                            is_left_void = np.mean(arr_check[py_i-10:py_i+10, max(0, px_i-40):max(1, px_i-15)] < 20) > 0.8
-                            is_down_void = np.mean(arr_check[min(319, py_i+15):min(320, py_i+35), max(0, px_i-10):min(480, px_i+10)] < 20) > 0.8
-                            if first_btn == "LEFT" and is_left_void:
-                                print(f"[Void Guard] Blocked by West Black Void at X={px_i}! Overriding to RIGHT (moving toward center of room).")
-                                flat_actions = ["RIGHT", "RIGHT"]
-                            elif first_btn == "DOWN" and is_down_void:
-                                print(f"[Void Guard] Blocked by South Black Void at Y={py_i}! Overriding to RIGHT (toward stairs).")
-                                flat_actions = ["RIGHT", "RIGHT"]
-                    except Exception:
-                        pass
-
-                    # Overworld Turning Mechanic:
-                    # If Red is facing direction A and the first action is direction B,
-                    # the first press only turns Red in place! A second press is required to actually move.
-                    first_dir = flat_actions[0].upper().strip()
-                    if first_dir in OPPOSITE_DIRECTIONS:
-                        if self.last_facing_direction and self.last_facing_direction != first_dir:
-                            # Prepend an extra turn press if the AI only sent a single press
-                            if len(flat_actions) == 1 or flat_actions[1].upper().strip() != first_dir:
-                                print(f"[Turning Assist] Changing facing from {self.last_facing_direction} to {first_dir}: prepending turn press.")
-                                flat_actions = [first_dir] + flat_actions
-
-                # 9. Multi-Action Batch Execution with Reactive Interrupt Watchdog
+                # 8. Execution Routing (BattleController vs MovementController vs Dialogue)
                 executed_actions: List[str] = []
-                interrupted_reason: Optional[str] = None
-                current_step_thumb = thumb
-                latest_frame = frame
 
-                for step_idx, btn in enumerate(flat_actions, start=1):
-                    if not self.screen_capture.is_window_alive():
-                        print("\n[SAFEGUARD TRIGGERED] Emulator window was closed or lost mid-batch!")
-                        self.is_running = False
-                        break
+                if self._is_naming_screen(frame):
+                    print("[Naming Screen] Waiting for character name input.")
+                    executed_actions = ["WAIT"]
+                elif scene.is_battle or intent == "BATTLE_ACTION":
+                    print(f"[Battle Action] Executing {battle_action or 'FIGHT'} (Move Slot {move_slot or 1})...")
+                    battle_res = self.battle_controller.execute_battle_strategy(
+                        battle_action=battle_action,
+                        move_slot=move_slot,
+                        target_item=target_item,
+                        switch_target_slot=switch_target_slot
+                    )
+                    executed_actions = battle_res.get("executed", [])
+                elif intent == "ADVANCE_DIALOGUE" or scene.is_dialogue:
+                    print("[Dialogue Action] Pressing A to advance text...")
+                    self.input_controller.press_button("A")
+                    executed_actions = ["A"]
+                elif intent == "WAIT":
+                    time.sleep(self.turn_settle_delay)
+                    executed_actions = ["WAIT"]
+                else:
+                    # Deterministic Grid Pathfinding via MovementController!
+                    print(f"[Motor Execution] Pathfinding Intent=[{intent}] Target=[{target_poi or 'Auto'}]...")
+                    move_res = self.movement_controller.plan_and_execute(
+                        intent=intent,
+                        target_poi_name=target_poi,
+                        scene=scene,
+                        frame=frame
+                    )
+                    executed_actions = move_res.get("executed_buttons", [])
+                    planned = move_res.get("planned_buttons", [])
+                    if not executed_actions and planned:
+                        executed_actions = planned
+                    print(f"[Movement Planned]: Route={move_res.get('target', '')} ({len(planned)} buttons: {' -> '.join(planned)})")
 
-                    self.input_controller.press_button(btn)
-                    executed_actions.append(btn)
+                # Grab fresh frame after actions executed
+                fresh_frame, _ = self.screen_capture.capture_frame()
+                if fresh_frame is not None:
+                    latest_frame = fresh_frame
 
-                    # Inter-step settle delay for character animation
-                    time.sleep(self.step_settle_delay)
-
-                    # Capture frame after step to verify outcome and watch for interrupts
-                    step_frame, step_thumb = self.screen_capture.capture_frame()
-                    if step_frame is not None and step_thumb is not None:
-                        latest_frame = step_frame
-
-                        if is_naming:
-                            # Bypass collision interrupts completely on the naming screen
-                            step_interrupted = False
-                            interrupt_why = None
-                            self.anti_stuck.record_action(self.turn_id, btn, reasoning, outcome="MOVED")
-                        else:
-                            # Check if this step should interrupt subsequent actions
-                            step_interrupted, interrupt_why = self.anti_stuck.check_step_interrupt(
-                                btn, current_step_thumb, step_thumb, is_menu_or_naming=False, current_area=self.memory_manager.current_area
-                            )
-                            step_outcome = "BLOCKED" if (step_interrupted and "COLLISION" in interrupt_why) else "MOVED"
-                            self.anti_stuck.record_action(self.turn_id, btn, reasoning, outcome=step_outcome)
-
-                            if step_interrupted and step_idx < len(flat_actions):
-                                interrupted_reason = interrupt_why
-                                print(f"[Interrupt Watchdog] Step {step_idx}/{len(flat_actions)} [{btn}] -> {interrupt_why}. Halting remaining batch steps.")
-                                break
-
-                        current_step_thumb = step_thumb
-                    else:
-                        self.anti_stuck.record_action(self.turn_id, btn, reasoning, outcome="MOVED")
+                # Record actions in anti-stuck watchdog
+                for act in executed_actions:
+                    self.anti_stuck.record_action(self.turn_id, act, reasoning, outcome="MOVED")
 
                 action_summary = " -> ".join(executed_actions) if executed_actions else "WAIT"
                 if len(executed_actions) > 1:

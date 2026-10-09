@@ -29,32 +29,63 @@ class GBAButton(str, Enum):
     WAIT = "WAIT"
 
 
-class ActionStep(BaseModel):
-    button: GBAButton = Field(
-        description="The GBA button: UP, DOWN, LEFT, RIGHT, A, B, START, SELECT, WAIT."
-    )
-    repeat: int = Field(
-        default=1,
-        ge=1,
-        le=8,
-        description="Number of times to press this button consecutively (1 to 8). E.g. repeat=4 to walk 4 steps in this direction."
-    )
+class NavigationIntent(str, Enum):
+    EXIT_ROOM = "EXIT_ROOM"              # Head for primary room exit / stairs / door
+    ENTER_BUILDING = "ENTER_BUILDING"    # Step into target building in overworld
+    GO_TO_POI = "GO_TO_POI"              # Pathfind to specific POI or object
+    EXPLORE_NORTH = "EXPLORE_NORTH"      # Journey north along road or path
+    EXPLORE_SOUTH = "EXPLORE_SOUTH"      # Journey south along road or path
+    EXPLORE_EAST = "EXPLORE_EAST"        # Journey east along road or path
+    EXPLORE_WEST = "EXPLORE_WEST"        # Journey west along road or path
+    TALK_TO_NPC = "TALK_TO_NPC"          # Approach and speak to NPC
+    ADVANCE_DIALOGUE = "ADVANCE_DIALOGUE"# Advance/dismiss dialogue or text on screen
+    OPEN_MENU = "OPEN_MENU"              # Open Start menu
+    BATTLE_ACTION = "BATTLE_ACTION"      # Execute battle strategy
+    WAIT = "WAIT"
+
+
+class BattleActionType(str, Enum):
+    FIGHT = "FIGHT"
+    BAG = "BAG"
+    SWITCH_POKEMON = "SWITCH_POKEMON"
+    RUN = "RUN"
 
 
 class StandardTurnResponse(BaseModel):
-    actions: List[GBAButton] = Field(
-        description="Ordered sequence of 1 to 6 GBA buttons to execute in sequence before next frame. Example for walking: ['UP', 'UP', 'UP', 'A']. Example to use battle Move 1 (ThunderShock): ['A', 'A']. Example for Move 2: ['A', 'RIGHT', 'A']. Example to flee battle: ['DOWN', 'RIGHT', 'A']."
+    intent: NavigationIntent = Field(
+        default=NavigationIntent.EXIT_ROOM,
+        description="High-level intent: EXIT_ROOM, ENTER_BUILDING, GO_TO_POI, EXPLORE_NORTH, EXPLORE_SOUTH, EXPLORE_EAST, EXPLORE_WEST, TALK_TO_NPC, ADVANCE_DIALOGUE, BATTLE_ACTION, WAIT."
     )
-    button: Optional[GBAButton] = Field(
+    target_poi: Optional[str] = Field(
         default=None,
-        description="Optional primary or first button of the sequence."
+        description="Target POI name if navigating to an object or NPC (e.g. 'STAIRS_DOWN', 'FRONT_DOOR', 'MOM', 'NURSE_JOY', 'OAK', 'PC')."
+    )
+    battle_action: Optional[BattleActionType] = Field(
+        default=None,
+        description="If in battle: FIGHT, BAG, SWITCH_POKEMON, or RUN."
+    )
+    move_slot: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=4,
+        description="If battle_action is FIGHT, which move slot (1 to 4) to execute."
+    )
+    target_item: Optional[str] = Field(
+        default=None,
+        description="If battle_action is BAG, item to use (e.g. 'POKE_BALL', 'POTION')."
+    )
+    switch_target_slot: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=6,
+        description="If battle_action is SWITCH_POKEMON, party member slot (1 to 6) to switch into."
     )
     reasoning: str = Field(
-        description="Brief 3 to 6 word internal explanation for this action plan."
+        description="Brief explanation of your strategic plan."
     )
     micro_step: Optional[str] = Field(
         default=None,
-        description="Optional 3-8 word immediate physical micro-step toward objective (e.g. 'Walk LEFT around fence', 'Walk UP through central square', 'Talk to Daisy at table'). Update when advancing phase."
+        description="Immediate tactical milestone summary (e.g. 'Walk down stairs to 1F', 'Talk to Mom', 'Exit outside to Pallet Town')."
     )
     new_quest: Optional[str] = Field(
         default=None,
@@ -70,19 +101,23 @@ class StandardTurnResponse(BaseModel):
     )
     discovered_poi: Optional[str] = Field(
         default=None,
-        description="If you discover a new landmark, blocked path, or important NPC in this area, state it here (or null)."
+        description="If you discover a new landmark or important NPC, state it here."
     )
     items_update: Optional[str] = Field(
         default=None,
-        description="If you bought or used items, summarize here (e.g. '+5 Poké Balls', 'Bought 1 Potion') (or null)."
+        description="If you bought or used items, summarize here (e.g. '+5 Poké Balls')."
     )
     party_update: Optional[str] = Field(
         default=None,
-        description="If you caught a Pokémon or leveled up, state it here (e.g. 'Caught Mankey Lv4') (or null)."
+        description="If you caught a Pokémon or leveled up, state it here."
     )
     opponent_pokemon: Optional[str] = Field(
         default=None,
-        description="If in a battle, state opposing Pokémon species on screen (e.g. 'Pidgey', 'Geodude', 'Onix') (or null)."
+        description="If in a battle, state opposing Pokémon species on screen (e.g. 'Pidgey', 'Geodude')."
+    )
+    actions: Optional[List[str]] = Field(
+        default=None,
+        description="Optional legacy fallback field (handled by local movement controller)."
     )
 
 
