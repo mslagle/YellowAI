@@ -1,0 +1,301 @@
+@import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&family=Outfit:wght@400;600;700;800&display=swap');
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    background-color: transparent;
+    font-family: 'Outfit', sans-serif;
+    color: #f8fafc;
+    padding: 14px;
+    width: 480px;
+    user-select: none;
+    overflow: hidden;
+}
+
+.overlay-container {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+/* Header Card */
+.header-card {
+    background: rgba(15, 23, 42, 0.90);
+    backdrop-filter: blur(10px);
+    border: 2px solid #eab308;
+    border-radius: 12px;
+    padding: 10px 14px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+}
+
+.brand-badge {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.pokeball-icon {
+    width: 18px;
+    height: 18px;
+    background: linear-gradient(to bottom, #ef4444 50%, #f8fafc 50%);
+    border: 2px solid #0f172a;
+    border-radius: 50%;
+    position: relative;
+    box-shadow: 0 0 8px rgba(239, 68, 68, 0.6);
+}
+
+.pokeball-icon::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 6px;
+    height: 6px;
+    background: #0f172a;
+    border: 1px solid #f8fafc;
+    border-radius: 50%;
+}
+
+.brand-title {
+    font-size: 14px;
+    font-weight: 800;
+    color: #facc15;
+    letter-spacing: 0.8px;
+}
+
+.ai-text {
+    color: #38bdf8;
+    margin-left: 2px;
+}
+
+.stats-group {
+    display: flex;
+    gap: 8px;
+}
+
+.stat-badge {
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 6px;
+    padding: 4px 8px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+}
+
+.stat-label {
+    font-size: 8px;
+    font-weight: 700;
+    color: #94a3b8;
+    letter-spacing: 0.5px;
+}
+
+.stat-val {
+    font-family: 'Press Start 2P', monospace;
+    font-size: 10px;
+    color: #38bdf8;
+    margin-top: 2px;
+}
+
+.action-badge {
+    border-color: #f59e0b;
+}
+
+.action-val {
+    color: #facc15;
+}
+
+/* Thought Quote Card */
+.thought-card {
+    background: rgba(15, 23, 42, 0.94);
+    backdrop-filter: blur(10px);
+    border-left: 4px solid #38bdf8;
+    border-radius: 0 12px 12px 0;
+    padding: 12px 14px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+}
+
+.speaker-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 6px;
+}
+
+.speaker-indicator {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.live-dot {
+    width: 7px;
+    height: 7px;
+    background: #22c55e;
+    border-radius: 50%;
+    animation: pulse 1.6s infinite;
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.3; transform: scale(0.8); }
+}
+
+.speaker-name {
+    font-size: 10px;
+    font-weight: 700;
+    color: #38bdf8;
+    letter-spacing: 0.8px;
+}
+
+/* Audio waves animation */
+.audio-waves {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    height: 12px;
+}
+
+.audio-waves .bar {
+    width: 3px;
+    height: 100%;
+    background: #38bdf8;
+    border-radius: 2px;
+    animation: bounce 1.2s ease-in-out infinite alternate;
+}
+
+.audio-waves .bar:nth-child(2) {
+    animation-delay: 0.2s;
+}
+
+.audio-waves .bar:nth-child(3) {
+    animation-delay: 0.4s;
+}
+
+@keyframes bounce {
+    0% { height: 4px; }
+    100% { height: 12px; }
+}
+
+.thought-text {
+    font-size: 13px;
+    line-height: 1.45;
+    color: #f1f5f9;
+    font-style: italic;
+    min-height: 38px;
+    transition: opacity 0.2s ease;
+}
+
+/* Memory Card */
+.memory-card {
+    background: rgba(15, 23, 42, 0.90);
+    backdrop-filter: blur(10px);
+    border: 1px solid #334155;
+    border-radius: 12px;
+    padding: 10px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+}
+
+.memory-tabs {
+    display: flex;
+    gap: 5px;
+    margin-bottom: 8px;
+}
+
+.tab-btn {
+    flex: 1;
+    background: #1e293b;
+    border: 1px solid #334155;
+    color: #94a3b8;
+    padding: 5px 4px;
+    border-radius: 6px;
+    font-size: 10px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.tab-btn:hover {
+    background: #334155;
+    color: #f8fafc;
+}
+
+.tab-btn.active {
+    background: #facc15;
+    color: #0f172a;
+    border-color: #facc15;
+    font-weight: 800;
+}
+
+.memory-content {
+    background: #020617;
+    border-radius: 8px;
+    padding: 8px 10px;
+    min-height: 52px;
+    display: flex;
+    align-items: center;
+}
+
+.memory-text {
+    font-size: 11px;
+    line-height: 1.45;
+    color: #cbd5e1;
+}
+
+/* Active Quest Banner */
+.quest-card {
+    background: rgba(30, 27, 75, 0.95);
+    backdrop-filter: blur(10px);
+    border: 2px solid #a855f7;
+    border-radius: 10px;
+    padding: 8px 12px;
+    box-shadow: 0 4px 16px rgba(168, 85, 247, 0.3);
+}
+
+.quest-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 4px;
+}
+
+.quest-icon {
+    font-size: 11px;
+}
+
+.quest-title {
+    font-size: 9px;
+    font-weight: 800;
+    color: #c084fc;
+    letter-spacing: 0.8px;
+}
+
+.quest-text {
+    font-size: 11px;
+    font-weight: 600;
+    color: #f3e8ff;
+    line-height: 1.35;
+}
+
+.secondary-quests-list {
+    margin-top: 6px;
+    padding-top: 5px;
+    border-top: 1px dashed rgba(168, 85, 247, 0.4);
+    font-size: 10px;
+    color: #e9d5ff;
+}
+
+.secondary-quest-item {
+    margin-top: 2px;
+    opacity: 0.85;
+}
+
+

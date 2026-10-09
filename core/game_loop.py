@@ -1,0 +1,507 @@
+"""
+Game loop orchestrator for YellowAI.
+Coordinates screen capture, Gemini 3.5 Flash decisions, hierarchical memory, input injection, and TTS commentary.
+STRICT INVARIANT: Gemini API is NEVER called unless mGBA emulator is actively running and verified visible.
+"""
+
+import time
+import json
+import sys
+from pathlib import Path
+from typing import Optional, List
+
+from config import (
+    BUTTON_HOLD_DURATION,
+    STEP_SETTLE_DELAY,
+    TURN_SETTLE_DELAY,
+    ANTI_STUCK_CONSECUTIVE_THRESHOLD,
+    OVERLAY_DIR,
+    OVERLAY_PORT,
+    ENABLE_OVERLAY_SERVER,
+    OVERLAY_STATE_FILE,
+    MEMORY_FILE,
+    KEY_MAPPINGS,
+    CAPTURE_TARGET_WIDTH,
+    CAPTURE_TARGET_HEIGHT,
+    EMULATOR_WINDOW_TITLE_KEYWORDS,
+    GEMINI_THINKING_BUDGET,
+    LAST_CAPTURE_FILE,
+    ENABLE_RESCUE_THINKING,
+    RESCUE_THINKING_BUDGET,
+    RESCUE_ENABLE_WEB_SEARCH,
+    RESCUE_STUCK_THRESHOLD,
+    RESCUE_COOLDOWN_TURNS,
+    ENABLE_BATTLE_THINKING,
+    BATTLE_THINKING_BUDGET,
+    LLM_BACKEND,
+    OLLAMA_BASE_URL,
+    OLLAMA_MODEL_ID
+)
+from emulator.screen_capture import ScreenCapture
+from emulator.input_controller import InputController
+from agent.gemini_player import GeminiPlayer
+from agent.prompts import BATTLE_TACTICAL_GUIDANCE
+from core.memory_manager import MemoryManager
+from core.anti_stuck import AntiStuckWatchdog, OPPOSITE_DIRECTIONS
+from tts.audio_queue import AudioQueueManager
+from overlay.server import OverlayServer
+
+class GameLoop:
+    def __init__(
+        self,
+        api_key: str = "",
+        model_id: str = "gemini-3.5-flash",
+        backend: str = LLM_BACKEND,
+        ollama_base_url: str = OLLAMA_BASE_URL,
+        ollama_model_id: str = OLLAMA_MODEL_ID,
+        thinking_budget: int = GEMINI_THINKING_BUDGET,
+        turn_settle_delay: float = TURN_SETTLE_DELAY,
+        step_settle_delay: float = STEP_SETTLE_DELAY,
+        enable_tts: bool = True
+    ):
+        self.turn_id = 0
+        self.is_running = False
+        self.backend = (backend or LLM_BACKEND).lower().strip()
+        self.turn_settle_delay = turn_settle_delay
+        self.step_settle_delay = step_settle_delay
+
+        # Initialize subsystems
+        self.screen_capture = ScreenCapture(
+            target_width=CAPTURE_TARGET_WIDTH,
+            target_height=CAPTURE_TARGET_HEIGHT,
+            window_keywords=EMULATOR_WINDOW_TITLE_KEYWORDS
+        )
+        self.input_controller = InputController(
+            key_mappings=KEY_MAPPINGS,
+            hold_duration=BUTTON_HOLD_DURATION
+        )
+        self.memory_manager = MemoryManager(storage_path=MEMORY_FILE)
+        
+        # Select active AI player backend (Local Ollama vs Cloud Gemini)
+        if self.backend == "ollama":
+            from agent.ollama_player import OllamaPlayer
+            self.gemini_player = OllamaPlayer(
+                base_url=ollama_base_url,
+                model_id=ollama_model_id
+            )
+        else:
+            self.gemini_player = GeminiPlayer(
+                api_key=api_key,
+                model_id=model_id,
+                thinking_budget=thinking_budget
+            )
+        self.anti_stuck = AntiStuckWatchdog(threshold_consecutive=ANTI_STUCK_CONSECUTIVE_THRESHOLD)
+        
+        self.enable_tts = enable_tts
+        self.audio_queue = AudioQueueManager() if enable_tts else None
+        
+        self.overlay_server = OverlayServer(OVERLAY_DIR, OVERLAY_PORT) if ENABLE_OVERLAY_SERVER else None
+
+        # Battle state tracking for tactical thinking on encounter/switch
+        self.in_battle: bool = False
+        self.current_opponent: Optional[str] = None
+        self.battle_advisor_given_for_opponent: Optional[str] = None
+
+    def _detect_screen_mode(self, frame: Image.Image) -> str:
+        """Lightweight screen mode hint to streamline Gemini prompt focus."""
+        micro = (self.memory_manager.micro_step or "").lower()
+        area = self.memory_manager.current_area.lower()
+        if self.in_battle or "battle" in micro or "fight" in micro or "wild" in micro or "catch" in micro:
+            return "BATTLE MODE: Check move PP (PP xx/xx). NEVER select a 0-PP move! If 'There\'s no PP left for this move!' is on screen, press A/B to clear, then press RIGHT or DOWN to pick a DIFFERENT move slot, switch Pokémon, or RUN!"
+        if "mart" in area or "buy" in micro or "shop" in micro or "clerk" in micro or "quit" in micro:
+            return "SHOP/MENU MODE: If on clerk menu (Buy/Sell/Quit) or done shopping, press DOWN to highlight 'Quit' and press A to exit! DO NOT press A on 'Buy'!"
+        return "OVERWORLD NAVIGATION: Focus on orthogonal navigation, obstacle clearance, and doorway anti-reversals."
+
+    def _export_overlay_state(self, action: str, thought: Optional[str] = None):
+        """Exports the latest state to JSON for OBS browser source overlay."""
+        state = {
+            "turn": self.turn_id,
+            "last_action": action,
+            "latest_thought": thought or "",
+            "priority_quest": self.memory_manager.priority_quest or "",
+            "active_quest": self.memory_manager.priority_quest or "",
+            "quests": self.memory_manager.quests,
+            "current_area": self.memory_manager.current_area,
+            "team": self.memory_manager.team,
+            "supplies": self.memory_manager.supplies,
+            "badges": self.memory_manager.badges,
+            "micro_step": self.memory_manager.micro_step or "",
+            "short_term_memory": self.memory_manager.short_term_memory,
+            "medium_term_memory": self.memory_manager.medium_term_memory,
+            "long_term_memory": self.memory_manager.long_term_memory,
+            "knowledge_notes": self.memory_manager.knowledge_notes,
+            "timestamp": time.time()
+        }
+        try:
+            with open(OVERLAY_STATE_FILE, "w", encoding="utf-8") as f:
+                json.dump(state, f, indent=2)
+        except Exception as e:
+            print(f"[GameLoop] Error writing overlay state: {e}")
+
+    def run(self, max_turns: Optional[int] = None) -> bool:
+        """
+        Executes the master game loop.
+        Strict Guarantee: Gemini API is NEVER called unless mGBA is actively running and visible.
+        """
+        backend_info = f"Local Ollama [{self.gemini_player.model_id}]" if self.backend == "ollama" else f"Gemini Flash [{self.gemini_player.model_id}]"
+        print("=" * 65)
+        print(" YellowAI: Pokémon Yellow Recharged Streamer")
+        print(f" Active Backend: {backend_info}")
+        print("=" * 65)
+
+        # 1. HARD PRE-CHECK: Strictly verify emulator presence before starting
+        print("[Safeguard] Checking for active mGBA emulator window...")
+        if not self.screen_capture.is_window_alive():
+            print("\n" + "!" * 65)
+            print(" [SAFEGUARD BLOCKED] mGBA emulator is not running or not visible!")
+            print(" Gemini API will NOT be called.")
+            print(" Please launch mGBA with Pokémon Yellow Recharged loaded.")
+            print(f" Target window keywords: {EMULATOR_WINDOW_TITLE_KEYWORDS}")
+            print(" YellowAI is aborting execution immediately.")
+            print("!" * 65 + "\n")
+            return False
+
+        print(f"[GameLoop] Successfully attached to emulator: '{self.screen_capture.target_title}' (HWND: {self.screen_capture.target_hwnd})")
+        self.input_controller.set_target_hwnd(self.screen_capture.target_hwnd)
+
+        # 2. Start background services only after emulator is verified
+        if self.overlay_server:
+            self.overlay_server.start()
+
+        if self.audio_queue:
+            self.audio_queue.start()
+
+        self.is_running = True
+
+        try:
+            while self.is_running:
+                # 3. PER-TURN SAFEGUARD CHECK: Ensure emulator didn't close mid-run
+                if not self.screen_capture.is_window_alive():
+                    print("\n" + "!" * 65)
+                    print(" [SAFEGUARD TRIGGERED] Emulator window was closed or lost!")
+                    print(" Gemini API call canceled. Stopping game loop immediately.")
+                    print("!" * 65 + "\n")
+                    break
+
+                # 4. Capture Frame
+                frame, thumb = self.screen_capture.capture_frame()
+                if frame is None:
+                    print("\n[SAFEGUARD TRIGGERED] Failed to capture frame from emulator.")
+                    print("Gemini API call canceled. Stopping game loop.")
+                    break
+
+                # Save the latest screen capture to where logs are stored
+                try:
+                    frame.save(LAST_CAPTURE_FILE)
+                except Exception:
+                    pass
+
+                self.turn_id += 1
+                start_time = time.time()
+
+                print(f"\n--- [TURN {self.turn_id}] ---")
+
+                # 5. Evaluate movement from previous turn and build action history
+                is_stuck, stuck_alert = self.anti_stuck.evaluate_frame(thumb)
+                repeated_a, repeat_alert = self.anti_stuck.check_repeated_action("A", threshold=3)
+                if repeated_a and repeat_alert:
+                    stuck_alert = f"{stuck_alert}\n{repeat_alert}" if stuck_alert else repeat_alert
+                    print(f"[Watchdog Notice] Repeated dialogue/action loop detected. Alerting Gemini.")
+
+                action_history_prompt = self.anti_stuck.get_action_history_prompt()
+                if is_stuck and stuck_alert:
+                    print(f"[Watchdog Alert]: {stuck_alert}")
+
+                # 6. Assemble memory context
+                memory_prompt = self.memory_manager.get_memory_context_prompt()
+
+                # Check if Last-Ditch Effort / Tactical Rescue is triggered
+                is_rescue, rescue_reason = self.anti_stuck.is_rescue_needed(
+                    rescue_threshold=RESCUE_STUCK_THRESHOLD
+                )
+
+                if ENABLE_RESCUE_THINKING and is_rescue:
+                    print("\n" + "=" * 65)
+                    print(" [LAST DITCH RESCUE TRIGGERED]")
+                    print(f" Condition: {rescue_reason}")
+                    print(f" Activating Medium Thinking Budget ({RESCUE_THINKING_BUDGET} tokens) + Web Search Grounding...")
+                    print("=" * 65)
+
+                    api_start = time.time()
+                    rescue_result = self.gemini_player.consult_tactical_rescue(
+                        image=frame,
+                        current_area=self.memory_manager.current_area,
+                        active_quest=self.memory_manager.active_quest or self.memory_manager.priority_quest or "Progress journey",
+                        micro_step=self.memory_manager.micro_step or "Navigate forward",
+                        action_history=action_history_prompt,
+                        stuck_alert=stuck_alert or "",
+                        rescue_reason=rescue_reason,
+                        thinking_budget=RESCUE_THINKING_BUDGET,
+                        enable_web_search=RESCUE_ENABLE_WEB_SEARCH,
+                        emulator_verified=True
+                    )
+                    api_duration = time.time() - api_start
+
+                    button = rescue_result.get("recommended_button", "B")
+                    flat_actions = rescue_result.get("flat_actions", [button])
+                    reasoning = f"Rescue: {rescue_result.get('situation_analysis', '')[:50]}"
+                    thought = rescue_result.get("stream_thought", None)
+                    cadence = rescue_result.get("cadence_tag", "TACTICAL_RESCUE")
+
+                    clues = rescue_result.get("clues_found", "")
+                    if clues:
+                        print(f"[Rescue Internet Clues]: {clues}")
+                        self.memory_manager.add_knowledge_note(clues.strip())
+                    print(f"[Rescue Analysis]: {rescue_result.get('situation_analysis', '')}")
+                    print(f"[Rescue Plan]: {rescue_result.get('tactical_plan', '')}")
+                    plan_str = " -> ".join(flat_actions) if len(flat_actions) > 1 else button
+                    print(f"Action Plan: [{plan_str}] | Reason: '{reasoning}' (Cadence: {cadence})")
+
+                    # Update micro-step and short-term memory with tactical breakthrough
+                    new_micro = rescue_result.get("updated_micro_step")
+                    if new_micro and isinstance(new_micro, str):
+                        self.memory_manager.update_micro_step(new_micro.strip())
+                        print(f"[Micro-Step Updated via Rescue]: '{new_micro.strip()}'")
+
+                    rescue_plan = rescue_result.get("tactical_plan", "")
+                    if rescue_plan:
+                        self.memory_manager.update_short_term(f"Tactical Rescue Plan: {rescue_plan}")
+
+                    # Notify watchdog so cooldown is set and stuck counters reset
+                    self.anti_stuck.notify_rescue_executed(cooldown_turns=RESCUE_COOLDOWN_TURNS)
+
+                    decision = {
+                        "button": button,
+                        "flat_actions": flat_actions,
+                        "reasoning": reasoning,
+                        "thought": thought,
+                        "cadence_tag": cadence
+                    }
+                else:
+                    # 7. Call Gemini with action history, active quest, mode hint, and stuck alerts
+                    mode_hint = self._detect_screen_mode(frame)
+
+                    # Check for Battle Opening / Enemy Pokémon Switch Thinking Budget
+                    trigger_battle_thinking = False
+                    battle_advisor_prompt = ""
+                    if ENABLE_BATTLE_THINKING and "BATTLE" in mode_hint:
+                        if not self.in_battle or (self.current_opponent and self.current_opponent != self.battle_advisor_given_for_opponent):
+                            trigger_battle_thinking = True
+                            battle_advisor_prompt = BATTLE_TACTICAL_GUIDANCE
+                            opp_label = self.current_opponent or "New Encounter"
+                            print(f"\n[Battle Strategy Triggered] Allocating {BATTLE_THINKING_BUDGET} thinking tokens for {opp_label}!")
+
+                    api_start = time.time()
+                    decision = self.gemini_player.decide_action(
+                        turn_id=self.turn_id,
+                        image=frame,
+                        memory_context=memory_prompt,
+                        active_quest=self.memory_manager.active_quest,
+                        action_history=action_history_prompt,
+                        stuck_alert=stuck_alert or "",
+                        mode_hint=mode_hint,
+                        battle_thinking_budget=BATTLE_THINKING_BUDGET if trigger_battle_thinking else None,
+                        battle_advisor_prompt=battle_advisor_prompt,
+                        emulator_verified=True  # Verified alive and visible right above!
+                    )
+                    api_duration = time.time() - api_start
+
+                    button = decision.get("button", "WAIT")
+                    flat_actions = decision.get("flat_actions", [button])
+                    reasoning = decision.get("reasoning", "")
+                    thought = decision.get("thought", None)
+                    cadence = decision.get("cadence_tag", "")
+
+                    plan_str = " -> ".join(flat_actions) if len(flat_actions) > 1 else button
+                    print(f"Action Plan: [{plan_str}] | Reason: '{reasoning}' (Cadence: {cadence})")
+
+                # Update Battle Tracking & Enemy Changes
+                opp = decision.get("opponent_pokemon")
+                if opp and isinstance(opp, str) and opp.strip() and opp.strip().upper() != "NULL":
+                    opp_clean = opp.strip()
+                    if not self.in_battle or self.current_opponent != opp_clean:
+                        print(f"[Battle Opponent Detected]: {opp_clean}")
+                        self.in_battle = True
+                        self.current_opponent = opp_clean
+                    if trigger_battle_thinking:
+                        self.battle_advisor_given_for_opponent = opp_clean
+                elif "BATTLE" in mode_hint and not self.in_battle:
+                    self.in_battle = True
+                elif "OVERWORLD" in mode_hint and self.in_battle:
+                    print("[Battle Concluded] Returning to Overworld navigation.")
+                    self.in_battle = False
+                    self.current_opponent = None
+                    self.battle_advisor_given_for_opponent = None
+
+                # Ingest Discovered POIs, Item Updates, and Party Changes
+                poi = decision.get("discovered_poi")
+                if poi and isinstance(poi, str) and poi.strip() and poi.strip().upper() != "NULL":
+                    self.memory_manager.add_waypoint(self.memory_manager.current_area, poi.strip())
+
+                items_up = decision.get("items_update")
+                if items_up and isinstance(items_up, str) and items_up.strip() and items_up.strip().upper() != "NULL":
+                    self.memory_manager.apply_items_update(items_up.strip())
+
+                party_up = decision.get("party_update")
+                if party_up and isinstance(party_up, str) and party_up.strip() and party_up.strip().upper() != "NULL":
+                    self.memory_manager.apply_party_update(party_up.strip())
+
+                # Process Multi-Quest Log Updates
+                comp_q = decision.get("completed_quest")
+                if comp_q and isinstance(comp_q, str) and comp_q.strip() and comp_q.strip().upper() != "NULL":
+                    removed = self.memory_manager.complete_quest(comp_q.strip())
+                    if removed:
+                        print(f"[Quest Log] Completed & Removed: '{removed}'")
+                        if self.memory_manager.priority_quest:
+                            print(f"[Quest Log] New Top Priority: '{self.memory_manager.priority_quest}'")
+
+                new_q = decision.get("new_quest")
+                prio_q = decision.get("priority_quest")
+                if new_q and isinstance(new_q, str) and new_q.strip() and new_q.strip().upper() != "NULL":
+                    is_prio = (prio_q == new_q or not self.memory_manager.priority_quest)
+                    self.memory_manager.add_quest(new_q.strip(), is_priority=is_prio)
+                    print(f"[Quest Log] New Quest Added: '{new_q.strip()}' (Priority: {is_prio})")
+
+                if prio_q and isinstance(prio_q, str) and prio_q.strip() and prio_q.strip().upper() != "NULL" and prio_q != new_q:
+                    self.memory_manager.set_priority_quest(prio_q.strip())
+                    print(f"[Quest Log] Priority Set: '{prio_q.strip()}'")
+
+                # Process Micro-Step Updates
+                micro_s = decision.get("micro_step")
+                if micro_s and isinstance(micro_s, str) and micro_s.strip() and micro_s.strip().upper() != "NULL":
+                    if self.memory_manager.micro_step != micro_s.strip():
+                        self.memory_manager.update_micro_step(micro_s.strip())
+                        print(f"[Micro-Step Updated]: '{micro_s.strip()}'")
+
+                # Fallback support for legacy active_command field
+                active_cmd = decision.get("active_command")
+                if active_cmd and isinstance(active_cmd, str) and active_cmd.strip():
+                    if active_cmd.strip().upper() == "COMPLETED":
+                        if self.memory_manager.priority_quest:
+                            self.memory_manager.complete_quest(self.memory_manager.priority_quest)
+                    elif active_cmd.strip().upper() != "NULL":
+                        self.memory_manager.add_quest(active_cmd.strip(), is_priority=True)
+
+                # Event-driven memory sync on doorway transitions
+                if self.anti_stuck.doorway_warp_turns == 2:
+                    self.memory_manager.save()
+
+                # 8. Emergency Menu Escape failsafe ONLY if stuck for extreme duration (8+ turns)
+                if self.anti_stuck.is_emergency_stuck():
+                    print(f"[Watchdog Emergency] Still stuck after {self.anti_stuck.consecutive_stuck_turns} turns. Triggering emergency escape!")
+                    self.input_controller.emergency_menu_escape(3, try_move_away=True)
+                    flat_actions = ["UP"]
+                else:
+                    flat_actions = decision.get("flat_actions", [button])
+
+                # 9. Multi-Action Batch Execution with Reactive Interrupt Watchdog
+                executed_actions: List[str] = []
+                interrupted_reason: Optional[str] = None
+                current_step_thumb = thumb
+                latest_frame = frame
+
+                for step_idx, btn in enumerate(flat_actions, start=1):
+                    if not self.screen_capture.is_window_alive():
+                        print("\n[SAFEGUARD TRIGGERED] Emulator window was closed or lost mid-batch!")
+                        self.is_running = False
+                        break
+
+                    self.input_controller.press_button(btn)
+                    executed_actions.append(btn)
+
+                    # Inter-step settle delay for character animation
+                    time.sleep(self.step_settle_delay)
+
+                    # Capture frame after step to verify outcome and watch for interrupts
+                    step_frame, step_thumb = self.screen_capture.capture_frame()
+                    if step_frame is not None and step_thumb is not None:
+                        latest_frame = step_frame
+
+                        # Check if this step should interrupt subsequent actions
+                        step_interrupted, interrupt_why = self.anti_stuck.check_step_interrupt(
+                            btn, current_step_thumb, step_thumb
+                        )
+                        step_outcome = "BLOCKED" if (step_interrupted and "COLLISION" in interrupt_why) else "MOVED"
+                        self.anti_stuck.record_action(self.turn_id, btn, reasoning, outcome=step_outcome)
+
+                        if step_interrupted and step_idx < len(flat_actions):
+                            interrupted_reason = interrupt_why
+                            print(f"[Interrupt Watchdog] Step {step_idx}/{len(flat_actions)} [{btn}] -> {interrupt_why}. Halting remaining batch steps.")
+                            break
+
+                        current_step_thumb = step_thumb
+                    else:
+                        self.anti_stuck.record_action(self.turn_id, btn, reasoning, outcome="MOVED")
+
+                action_summary = " -> ".join(executed_actions) if executed_actions else "WAIT"
+                if len(executed_actions) > 1:
+                    print(f"[Batch Executed]: [{action_summary}] ({len(executed_actions)} steps)")
+
+                # Save the latest screen capture
+                try:
+                    latest_frame.save(LAST_CAPTURE_FILE)
+                except Exception:
+                    pass
+
+                # 10. Process Cadence Triggers
+                if thought:
+                    print(f"Thought (TTS): \"{thought}\"")
+                    if self.audio_queue:
+                        self.audio_queue.enqueue_thought(thought)
+
+                if "short_term_memory" in decision:
+                    new_stm = decision["short_term_memory"]
+                    print(f"[Short-Term Memory Updated]: {new_stm}")
+                    self.memory_manager.update_short_term(new_stm)
+
+                if "medium_term_memory" in decision:
+                    new_mtm = decision["medium_term_memory"]
+                    print(f"[Medium-Term Memory Updated]: {new_mtm}")
+                    self.memory_manager.update_medium_term(new_mtm)
+
+                if "long_term_memory" in decision:
+                    new_ltm = decision["long_term_memory"]
+                    print(f"[Long-Term Memory Updated]: {new_ltm}")
+                    self.memory_manager.update_long_term(new_ltm)
+
+                # 11. Record History & Export Stream Overlay
+                self.memory_manager.log_turn(
+                    turn_id=self.turn_id,
+                    action=action_summary,
+                    thought=thought,
+                    reasoning=reasoning
+                )
+                self._export_overlay_state(action=action_summary, thought=thought)
+
+                # 12. Paced Delay between turns (allows GBA step animation to settle before next capture)
+                wait_time = max(0.05, self.turn_settle_delay)
+                time.sleep(wait_time)
+
+                turn_duration = time.time() - start_time
+                usage = decision.get("usage", {})
+                prompt_tok = usage.get("prompt_tokens", 0)
+                cand_tok = usage.get("candidates_tokens", 0)
+                tok_str = f" | Tokens: {prompt_tok} in / {cand_tok} out" if prompt_tok else ""
+                print(f"[Turn {self.turn_id} Complete in {turn_duration:.2f}s] (API: {api_duration:.2f}s{tok_str} | Settle: {wait_time:.2f}s)")
+
+                if max_turns and self.turn_id >= max_turns:
+                    print(f"\n[GameLoop] Reached maximum requested turns ({max_turns}). Stopping.")
+                    break
+
+            return True
+
+        except KeyboardInterrupt:
+            print("\n[GameLoop] User interrupted execution (Ctrl+C).")
+            return True
+        finally:
+            self.stop()
+
+    def stop(self):
+        """Stops the loop, overlay server, and releases audio queue."""
+        self.is_running = False
+        if self.audio_queue:
+            self.audio_queue.stop()
+        if self.overlay_server:
+            self.overlay_server.stop()
+        self.memory_manager.save()
+        print("[GameLoop] Saved memory state and exited cleanly.")

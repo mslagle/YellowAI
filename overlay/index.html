@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>YellowAI Stream Overlay</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="overlay-container">
+        <!-- Top Status Bar -->
+        <div class="header-card">
+            <div class="brand-badge">
+                <span class="pokeball-icon"></span>
+                <span class="brand-title">YELLOW<span class="ai-text">AI</span></span>
+            </div>
+            <div class="stats-group">
+                <div class="stat-badge">
+                    <span class="stat-label">TURN</span>
+                    <span id="turn-counter" class="stat-val">0</span>
+                </div>
+                <div class="stat-badge action-badge">
+                    <span class="stat-label">GBA INPUT</span>
+                    <span id="last-action" class="stat-val action-val">START</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Live Commentary Speech Bubble -->
+        <div class="thought-card">
+            <div class="speaker-header">
+                <div class="speaker-indicator">
+                    <span class="live-dot"></span>
+                    <span class="speaker-name">GEMINI FLASH COMMENTARY</span>
+                </div>
+                <div class="audio-waves">
+                    <span class="bar"></span>
+                    <span class="bar"></span>
+                    <span class="bar"></span>
+                </div>
+            </div>
+            <div id="thought-quote" class="thought-text">
+                "Waking up in Pallet Town! Let's go see what Professor Oak has in store for us!"
+            </div>
+        </div>
+
+        <!-- Active Quest / NPC Directive Banner -->
+        <div id="quest-banner" class="quest-card" style="display: none;">
+            <div class="quest-header">
+                <span class="quest-icon">⭐</span>
+                <span class="quest-title">HIGHEST PRIORITY QUEST</span>
+            </div>
+            <div id="quest-text" class="quest-text">None</div>
+            <div id="secondary-quests" class="secondary-quests-list" style="display: none;"></div>
+        <!-- Team & Supplies HUD Card -->
+        <div id="trainer-hud" class="quest-card" style="margin-top: 6px; margin-bottom: 6px; padding: 6px 12px; background: rgba(15, 23, 42, 0.85); border: 1px solid rgba(255, 215, 0, 0.3);">
+            <div style="display: flex; justify-content: space-between; font-size: 11px; font-weight: 700; color: #ffd700; text-transform: uppercase;">
+                <span id="hud-team">⚡ Pikachu Lv6</span>
+                <span id="hud-balls">🔴 0 Balls</span>
+                <span id="hud-money">¥2,992</span>
+            </div>
+        </div>
+
+        <!-- Hierarchical Memory Card -->
+        <div class="memory-card">
+            <div class="memory-tabs">
+                <button id="tab-short" class="tab-btn active" onclick="setTab('short')">Short (10t)</button>
+                <button id="tab-medium" class="tab-btn" onclick="setTab('medium')">Medium (50t)</button>
+                <button id="tab-long" class="tab-btn" onclick="setTab('long')">Long (100t)</button>
+            </div>
+            <div class="memory-content">
+                <div id="memory-text" class="memory-text">Loading tactical state...</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentTab = 'short';
+        let autoCycle = true;
+        let memoryData = {
+            short: "Starting new game in Pokémon Yellow Recharged.",
+            medium: "Pallet Town: Begin journey, speak with Professor Oak, receive starter Pokémon, defeat Rival.",
+            long: "Grand Goal: Defeat all 8 Kanto Gym Leaders, conquer the Elite Four, and become Pokémon Champion."
+        };
+
+        function setTab(tab, userInitiated = false) {
+            currentTab = tab;
+            if (userInitiated) autoCycle = false;
+            document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+            const activeBtn = document.getElementById(`tab-${tab}`);
+            if (activeBtn) activeBtn.classList.add('active');
+            updateMemoryDisplay();
+        }
+
+        function updateMemoryDisplay() {
+            const elem = document.getElementById('memory-text');
+            elem.innerText = memoryData[currentTab] || "Awaiting memory update...";
+        }
+
+        // Auto-cycle through memories every 12 seconds so stream viewers see all tiers
+        setInterval(() => {
+            if (!autoCycle) return;
+            const tabs = ['short', 'medium', 'long'];
+            const nextIdx = (tabs.indexOf(currentTab) + 1) % tabs.length;
+            setTab(tabs[nextIdx], false);
+        }, 12000);
+
+        let lastThought = "";
+
+        async function fetchState() {
+            try {
+                const response = await fetch('overlay_state.json?t=' + Date.now());
+                if (!response.ok) return;
+                const data = await response.json();
+
+                document.getElementById('turn-counter').innerText = data.turn || 0;
+                
+                const actionElem = document.getElementById('last-action');
+                actionElem.innerText = data.last_action || '-';
+
+                if (data.latest_thought && data.latest_thought.trim()) {
+                    const quoteElem = document.getElementById('thought-quote');
+                    if (data.latest_thought !== lastThought) {
+                        lastThought = data.latest_thought;
+                        quoteElem.style.opacity = '0.3';
+                        setTimeout(() => {
+                            quoteElem.innerText = `"${data.latest_thought}"`;
+                            quoteElem.style.opacity = '1';
+                        }, 150);
+                    }
+                }
+
+                memoryData.short = data.short_term_memory || memoryData.short;
+                memoryData.medium = data.medium_term_memory || memoryData.medium;
+                memoryData.long = data.long_term_memory || memoryData.long;
+
+                const questBanner = document.getElementById('quest-banner');
+                const prioQuest = data.priority_quest || data.active_quest;
+                if (prioQuest && prioQuest.trim()) {
+                    questBanner.style.display = 'block';
+                    document.getElementById('quest-text').innerText = prioQuest;
+
+                    const secondaryElem = document.getElementById('secondary-quests');
+                    const allQuests = data.quests || [];
+                    const secondary = allQuests.filter(q => q !== prioQuest);
+                    if (secondary.length > 0) {
+                        secondaryElem.style.display = 'block';
+                        secondaryElem.innerHTML = secondary.map(q => `<div class="secondary-quest-item">• ${q}</div>`).join('');
+                    } else {
+                        secondaryElem.style.display = 'none';
+                    }
+                } else {
+                    questBanner.style.display = 'none';
+                }
+
+                if (data.team && data.team.length > 0) {
+                    const lead = data.team.find(p => p.lead) || data.team[0];
+                    document.getElementById('hud-team').innerText = `⚡ ${lead.species} Lv${lead.level || '?'}`;
+                }
+                if (data.supplies) {
+                    const balls = data.supplies.poke_balls || 0;
+                    document.getElementById('hud-balls').innerText = `🔴 ${balls} Ball${balls === 1 ? '' : 's'}`;
+                    const money = (data.supplies.money || 0).toLocaleString();
+                    document.getElementById('hud-money').innerText = `¥${money}`;
+                }
+
+                updateMemoryDisplay();
+            } catch (err) {
+                // Ignore transient network read drops
+            }
+        }
+
+        setInterval(fetchState, 500);
+        fetchState();
+    </script>
+</body>
+</html>
