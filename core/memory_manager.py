@@ -60,31 +60,26 @@ class MemoryManager:
         self.turn_history: List[Dict[str, Any]] = []
         
         # Multi-quest tracking & active quest management
-        self.quests: List[str] = []
-        self.priority_quest: Optional[str] = None
-        self.current_area: str = "Pallet Town"
+        self.quests: List[str] = ["Leave Red's bedroom, go downstairs, and talk to Mom"]
+        self.priority_quest: Optional[str] = "Leave Red's bedroom, go downstairs, and talk to Mom"
+        self.current_area: str = "Pallet Town (Red's Bedroom)"
         self.waypoints: Dict[str, List[str]] = dict(DEFAULT_AREA_WAYPOINTS)
         self.short_term_memory: str = "In Red's bedroom (2F upstairs). Need to walk UP and RIGHT to the staircase in the top-right corner to go downstairs."
-        self.medium_term_memory: str = "Pallet Town: Go downstairs, head outside, meet Professor Oak, choose starter Pokémon, and defeat Rival."
+        self.medium_term_memory: str = "Pallet Town: Go downstairs, talk to Mom, head outside, meet Professor Oak, choose starter Pokémon, and defeat Rival."
         self.long_term_memory: str = "Grand Goal: Defeat all 8 Kanto Gym Leaders, conquer the Elite Four, and become Pokémon Champion."
         # Topological route breadcrumbs & immediate micro-step
         self.route_trail: List[str] = [
-            "Mom's House",
-            "Central Pallet Town",
-            "Oak's Research Lab",
-            "Pallet Town (Outside Oak's Lab)"
+            "Red's Bedroom (2F)"
         ]
-        self.micro_step: Optional[str] = "Walk LEFT around fence into town square"
+        self.micro_step: Optional[str] = "Walk UP and RIGHT to staircase in top-right corner to go downstairs"
 
         # Structured Party, Supplies, Badges, and ROM Knowledge Notes
-        self.team: List[Dict[str, Any]] = [
-            {"species": "Pikachu", "level": 6, "lead": True, "key_moves": ["ThunderShock", "Tail Whip"]}
-        ]
+        self.team: List[Dict[str, Any]] = []
         self.supplies: Dict[str, Any] = {
             "poke_balls": 0,
-            "potions": 1,
-            "town_map": True,
-            "money": 2992
+            "potions": 0,
+            "town_map": False,
+            "money": 3000
         }
         self.badges: int = 0
         self.last_items_update: Optional[str] = None
@@ -442,31 +437,28 @@ class MemoryManager:
 
     def reset(self):
         """Resets memory to clean starting slate."""
-        self.quests = []
-        self.priority_quest = None
-        self.current_area = "Pallet Town"
+        self.quests = ["Leave Red's bedroom, go downstairs, and talk to Mom"]
+        self.priority_quest = "Leave Red's bedroom, go downstairs, and talk to Mom"
+        self.current_area = "Pallet Town (Red's Bedroom)"
         self.route_trail = [
-            "Red's Bedroom (2F)",
-            "Mom's Living Room (1F)"
+            "Red's Bedroom (2F)"
         ]
-        self.micro_step = "Walk DOWN through front door onto red mat"
-        self.team = [
-            {"species": "Pikachu", "level": 6, "lead": True, "key_moves": ["ThunderShock", "Tail Whip"]}
-        ]
+        self.micro_step = "Walk UP and RIGHT to staircase in top-right corner to go downstairs"
+        self.team = []
         self.supplies = {
             "poke_balls": 0,
-            "potions": 1,
-            "town_map": True,
-            "money": 2992
+            "potions": 0,
+            "town_map": False,
+            "money": 3000
         }
         self.badges = 0
         self.knowledge_notes = [
             "Yellow Recharged: Poké Balls available immediately at Viridian Mart with no parcel required to unlock."
         ]
         self.waypoints = dict(DEFAULT_AREA_WAYPOINTS)
-        self.short_term_memory = "In Red's bedroom (2F upstairs). Need to walk UP and RIGHT to the staircase in the top-right corner to go downstairs."
-        self.medium_term_memory = "Pallet Town: Go downstairs, head outside, meet Professor Oak, choose starter Pokémon, and defeat Rival."
+        self.short_term_memory = "Just started a fresh game in Red's bedroom (2F upstairs). Need to walk UP and RIGHT to the staircase in the top-right corner to go downstairs."
+        self.medium_term_memory = "Pallet Town: Go downstairs, talk to Mom, head outside, meet Professor Oak, choose starter Pokémon, and defeat Rival."
         self.long_term_memory = "Grand Goal: Defeat all 8 Kanto Gym Leaders, conquer the Elite Four, and become Pokémon Champion."
         self.turn_history.clear()
         self.save()
-        print("[MemoryManager] Reset memory to defaults.")
+        print("[MemoryManager] Reset memory to clean starting slate.")

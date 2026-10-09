@@ -45,7 +45,11 @@ GEMINI_THINKING_BUDGET = int(os.getenv("GEMINI_THINKING_BUDGET", "0"))
 
 # Local Ollama Settings (100% Free / Offline VLM)
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL_ID = os.getenv("OLLAMA_MODEL_ID", "qwen2.5-vl:7b")
+OLLAMA_MODEL_ID = os.getenv("OLLAMA_MODEL_ID", "qwen3.5")
+
+# Local Bionic / LM Studio Settings (100% Free / Port 1234)
+BIONIC_BASE_URL = os.getenv("BIONIC_BASE_URL", "http://localhost:1234/v1")
+BIONIC_MODEL_ID = os.getenv("BIONIC_MODEL_ID", "default")
 
 # Turn Timing and Delays (in seconds)
 BUTTON_HOLD_DURATION = 0.12     # GBA needs ~2-4 frames hold (60fps = ~16ms/frame)

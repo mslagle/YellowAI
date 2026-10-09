@@ -27,7 +27,7 @@ class OllamaPlayer:
     def __init__(
         self,
         base_url: str = "http://localhost:11434",
-        model_id: str = "qwen2.5-vl:7b",
+        model_id: str = "qwen3.5",
         temperature: float = 0.2,
         timeout: float = 45.0
     ):

@@ -46,18 +46,49 @@ if errorlevel 1 (
 )
 echo Python packages are up to date.
 
-:: 5. Check Environment File (.env)
-if not exist ".env" (
-    echo [NOTICE] .env file not found. Creating from .env.example...
-    copy .env.example .env >nul
-    echo [ACTION REQUIRED] Please edit the .env file with your GEMINI_API_KEY before running!
+:: 5. Select Backend (if not already specified in args)
+set "HAS_BACKEND="
+for %%A in (%*) do (
+    if /i "%%A"=="--backend" set "HAS_BACKEND=1"
 )
 
-:: 6. Launch Main Script with Logger
+set "BACKEND_FLAG="
+if not defined HAS_BACKEND (
+    echo.
+    echo =====================================================================
+    echo  Select Intelligence Backend:
+    echo  [1] Google Gemini 3.5 Flash [Cloud API]
+    echo  [2] Ollama Local VLM [100%% Free / RTX 3060 - Qwen 3.5]
+    echo  [3] Bionic / LM Studio Local Server [100%% Free / Port 1234]
+    echo =====================================================================
+    set "USER_CHOICE=1"
+    set /p "USER_CHOICE=Enter choice [1, 2, or 3, default is 1]: "
+    if "!USER_CHOICE!"=="3" (
+        set "BACKEND_FLAG=--backend bionic"
+        echo [Backend] Selected: Bionic / LM Studio Local Server
+    ) else if "!USER_CHOICE!"=="2" (
+        set "BACKEND_FLAG=--backend ollama"
+        echo [Backend] Selected: Ollama Local VLM
+    ) else (
+        set "BACKEND_FLAG=--backend gemini"
+        echo [Backend] Selected: Google Gemini 3.5 Flash
+    )
+)
+
+:: 6. Check Environment File (.env) for Gemini
+if "!BACKEND_FLAG!"=="--backend gemini" (
+    if not exist ".env" (
+        echo [NOTICE] .env file not found. Creating from .env.example...
+        copy .env.example .env >nul
+        echo [ACTION REQUIRED] Please edit the .env file with your GEMINI_API_KEY before running!
+    )
+)
+
+:: 7. Launch Main Script with Logger
 echo.
-echo [Step 3/3] Checking for mGBA and launching YellowAI (logging to logs/latest.log)...
+echo [Step 3/3] Checking for mGBA and launching YellowAI...
 echo.
-python main.py %*
+python main.py !BACKEND_FLAG! %*
 
 set SCRIPT_EXIT_CODE=%ERRORLEVEL%
 if %SCRIPT_EXIT_CODE% NEQ 0 (
@@ -65,7 +96,7 @@ if %SCRIPT_EXIT_CODE% NEQ 0 (
     echo =====================================================================
     echo  YellowAI stopped with code %SCRIPT_EXIT_CODE%.
     echo  Ensure mGBA is running with Pokemon Yellow Recharged before starting.
-    echo  Check logs/latest.log for detailed output.
+    echo  Check logs/ for detailed output.
     echo =====================================================================
     echo.
     pause

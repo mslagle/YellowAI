@@ -35,12 +35,14 @@ from config import (
     BATTLE_THINKING_BUDGET,
     LLM_BACKEND,
     OLLAMA_BASE_URL,
-    OLLAMA_MODEL_ID
+    OLLAMA_MODEL_ID,
+    BIONIC_BASE_URL,
+    BIONIC_MODEL_ID
 )
 from emulator.screen_capture import ScreenCapture
 from emulator.input_controller import InputController
 from agent.gemini_player import GeminiPlayer
-from agent.prompts import BATTLE_TACTICAL_GUIDANCE
+from agent.prompts import BATTLE_TACTICAL_GUIDANCE, NAMING_SCREEN_GUIDANCE
 from core.memory_manager import MemoryManager
 from core.anti_stuck import AntiStuckWatchdog, OPPOSITE_DIRECTIONS
 from tts.audio_queue import AudioQueueManager
@@ -54,6 +56,8 @@ class GameLoop:
         backend: str = LLM_BACKEND,
         ollama_base_url: str = OLLAMA_BASE_URL,
         ollama_model_id: str = OLLAMA_MODEL_ID,
+        bionic_base_url: str = BIONIC_BASE_URL,
+        bionic_model_id: str = BIONIC_MODEL_ID,
         thinking_budget: int = GEMINI_THINKING_BUDGET,
         turn_settle_delay: float = TURN_SETTLE_DELAY,
         step_settle_delay: float = STEP_SETTLE_DELAY,
@@ -77,8 +81,14 @@ class GameLoop:
         )
         self.memory_manager = MemoryManager(storage_path=MEMORY_FILE)
         
-        # Select active AI player backend (Local Ollama vs Cloud Gemini)
-        if self.backend == "ollama":
+        # Select active AI player backend (Local Bionic vs Local Ollama vs Cloud Gemini)
+        if self.backend in ["bionic", "lmstudio"]:
+            from agent.bionic_player import BionicPlayer
+            self.gemini_player = BionicPlayer(
+                base_url=bionic_base_url,
+                model_id=bionic_model_id
+            )
+        elif self.backend == "ollama":
             from agent.ollama_player import OllamaPlayer
             self.gemini_player = OllamaPlayer(
                 base_url=ollama_base_url,
@@ -102,8 +112,52 @@ class GameLoop:
         self.current_opponent: Optional[str] = None
         self.battle_advisor_given_for_opponent: Optional[str] = None
 
+    def _is_naming_screen(self, frame: Image.Image) -> bool:
+        """Visual check for the GBA Gen 3 / Recharged Yellow naming keyboard screen."""
+        try:
+            import numpy as np
+            resized = frame.resize((480, 320))
+            arr = np.array(resized)
+            # 1. Top banner: blue header band
+            top_blue = np.mean((arr[5:20, 10:200, 0] < 50) & (arr[5:20, 10:200, 1] > 70) & (arr[5:20, 10:200, 2] > 180))
+            # 2. Tan/peach keyboard container
+            keyboard_tan = np.mean((arr[160:280, 50:350, 0] > 160) & (arr[160:280, 50:350, 1] > 110) & (arr[160:280, 50:350, 2] < 160))
+            # 3. Yellow OK button at bottom-right
+            ok_yellow = np.mean((arr[250:290, 390:460, 0] > 180) & (arr[250:290, 390:460, 1] > 170) & (arr[250:290, 390:460, 2] < 140))
+            return bool(top_blue > 0.35 and keyboard_tan > 0.45 and ok_yellow > 0.05)
+        except Exception:
+            return False
+
     def _detect_screen_mode(self, frame: Image.Image) -> str:
         """Lightweight screen mode hint to streamline Gemini prompt focus."""
+        if self._is_naming_screen(frame):
+            try:
+                import numpy as np
+                resized = frame.resize((480, 320))
+                arr = np.array(resized)
+                has_red_cap = np.any((arr[50:110, 80:160, 0] > 180) & (arr[50:110, 80:160, 1] < 80) & (arr[50:110, 80:160, 2] < 80))
+                who = "Player Character (Red)" if has_red_cap else "Rival Character (Blue)"
+                target_name = "RED" if has_red_cap else "BLUE"
+                print(f"[Screen Mode Detected] Naming Keyboard Screen -> Naming {who}!")
+
+                # Dynamically align quest priorities with character naming
+                prio = (self.memory_manager.priority_quest or "").lower()
+                if "bedroom" in prio or "mom" in prio or not prio:
+                    self.memory_manager.set_priority_quest(f"Name {who}: Type a meaningful name (e.g. '{target_name}') on keyboard, then confirm with START")
+                    self.memory_manager.current_area = "Intro: Character Naming Screen"
+                    self.memory_manager.update_micro_step(f"Type '{target_name}' on keyboard")
+
+                return f"{NAMING_SCREEN_GUIDANCE}\n\n[DETECTED TARGET]: You are currently naming the {who.upper()}! Choose a name like '{target_name}' and type it before confirming."
+            except Exception:
+                return NAMING_SCREEN_GUIDANCE
+
+        # If we just left the naming screen, transition back to bedroom/Pallet Town quest
+        if self.memory_manager.current_area == "Intro: Character Naming Screen":
+            print("[Game Transition] Naming completed! Entering Red's bedroom (2F).")
+            self.memory_manager.current_area = "Pallet Town (Red's Bedroom)"
+            self.memory_manager.set_priority_quest("Leave Red's bedroom, go downstairs, and talk to Mom")
+            self.memory_manager.update_micro_step("Walk UP and RIGHT to staircase in top-right corner to go downstairs")
+
         micro = (self.memory_manager.micro_step or "").lower()
         area = self.memory_manager.current_area.lower()
         if self.in_battle or "battle" in micro or "fight" in micro or "wild" in micro or "catch" in micro:
@@ -143,7 +197,12 @@ class GameLoop:
         Executes the master game loop.
         Strict Guarantee: Gemini API is NEVER called unless mGBA is actively running and visible.
         """
-        backend_info = f"Local Ollama [{self.gemini_player.model_id}]" if self.backend == "ollama" else f"Gemini Flash [{self.gemini_player.model_id}]"
+        if self.backend in ["bionic", "lmstudio"]:
+            backend_info = f"Local Bionic / LM Studio [{self.gemini_player.model_id}]"
+        elif self.backend == "ollama":
+            backend_info = f"Local Ollama [{self.gemini_player.model_id}]"
+        else:
+            backend_info = f"Gemini Flash [{self.gemini_player.model_id}]"
         print("=" * 65)
         print(" YellowAI: Pokémon Yellow Recharged Streamer")
         print(f" Active Backend: {backend_info}")
@@ -388,9 +447,13 @@ class GameLoop:
 
                 # 8. Emergency Menu Escape failsafe ONLY if stuck for extreme duration (8+ turns)
                 if self.anti_stuck.is_emergency_stuck():
-                    print(f"[Watchdog Emergency] Still stuck after {self.anti_stuck.consecutive_stuck_turns} turns. Triggering emergency escape!")
-                    self.input_controller.emergency_menu_escape(3, try_move_away=True)
-                    flat_actions = ["UP"]
+                    if self._is_naming_screen(frame):
+                        print(f"[Watchdog Emergency] Stuck on Naming Screen after {self.anti_stuck.consecutive_stuck_turns} turns. Pressing START to confirm [OK]!")
+                        flat_actions = ["START"]
+                    else:
+                        print(f"[Watchdog Emergency] Still stuck after {self.anti_stuck.consecutive_stuck_turns} turns. Triggering emergency escape!")
+                        self.input_controller.emergency_menu_escape(3, try_move_away=True)
+                        flat_actions = ["UP"]
                 else:
                     flat_actions = decision.get("flat_actions", [button])
 

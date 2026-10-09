@@ -1,63 +1,34 @@
 {
-  "turn": 33,
-  "last_action": "A",
+  "turn": 2,
+  "last_action": "START",
   "latest_thought": "",
-  "priority_quest": "Defeat Brock at Pewter City Gym",
-  "active_quest": "Defeat Brock at Pewter City Gym",
+  "priority_quest": "Leave Red's bedroom, go downstairs, and talk to Mom",
+  "active_quest": "Leave Red's bedroom, go downstairs, and talk to Mom",
   "quests": [
-    "Defeat Brock at Pewter City Gym"
+    "Leave Red's bedroom, go downstairs, and talk to Mom"
   ],
-  "current_area": "Route 1",
+  "current_area": "Pallet Town",
   "team": [
     {
-      "species": "Pikachu",
-      "level": 9,
-      "lead": true,
-      "key_moves": [
-        "ThunderShock",
-        "Tail Whip",
-        "Thunder Wave"
-      ]
-    },
-    {
-      "species": "Nidoran",
+      "species": "Pidgey",
       "level": 3,
-      "lead": false,
-      "key_moves": []
-    },
-    {
-      "species": "Bellsprout",
-      "level": 2,
-      "lead": false,
-      "key_moves": []
-    },
-    {
-      "species": "Oddish",
-      "level": 4,
       "lead": false,
       "key_moves": []
     }
   ],
   "supplies": {
     "poke_balls": 1,
-    "potions": 1,
-    "town_map": true,
-    "money": 192
+    "potions": 0,
+    "town_map": false,
+    "money": 3000
   },
   "badges": 0,
-  "micro_step": "Walk up through the grass gap",
-  "short_term_memory": "We are navigating Route 1 ledges and grass gaps to head north toward Viridian City.",
-  "medium_term_memory": "We are traveling north on Route 1 toward Viridian City. Our ultimate goal is to reach Pewter City and defeat Brock.",
-  "long_term_memory": "We started in Pallet Town with Pikachu and have caught Nidoran, Bellsprout, and Oddish. We are heading to Pewter City to heal and challenge Brock for our first gym badge.",
+  "micro_step": "Confirm name with START button",
+  "short_term_memory": "Exited the 'Your name?' text input screen. Ready to navigate downstairs from Red's bedroom.",
+  "medium_term_memory": "Currently in Pallet Town, inside Red's house on the second floor. Goal is to reach Mom downstairs.",
+  "long_term_memory": "Grand Goal: Defeat all 8 Kanto Gym Leaders, conquer the Elite Four, and become Pok\u00e9mon Champion.",
   "knowledge_notes": [
-    "In Pok\u00e9mon Yellow Recharged, wild encounters on Route 1 can be bypassed or fought using active party members. Since Pikachu's primary move is out of PP, switching to another Pok\u00e9mon or fleeing is necessary to avoid getting stuck.",
-    "The player is currently in a wild battle on Route 1 against a Level 3 Rattata using a Level 9 Pikachu. The battle menu is currently hidden or transitioning, indicating we are in between turn actions or menu screens.",
-    "The game is Pok\u00e9mon Yellow Recharged, built on the Emerald engine. We are currently in a wild battle on Route 1 against a Level 3 Rattata with our Level 9 Pikachu.",
-    "In the Pok\u00e9mon Emerald engine used by Pok\u00e9mon Yellow Recharged, the battle menu layout places 'FIGHT' above 'POK\u00e9MON'. When exiting the party menu, the cursor defaults to 'POK\u00e9MON'.",
-    "The game is built on the Pok\u00e9mon Emerald engine, where the battle menu layout places FIGHT in the top-left and POK\u00e9MON in the bottom-left. The player is currently stuck in a loop of selecting the party menu and backing out.",
-    "Pikachu is in a wild battle against a Level 3 Rattata on Route 1. ThunderShock is completely out of PP (0/30), but other moves like Growl, Tail Whip, and Thunder Wave are fully available.",
-    "The party screen shows Pikachu and Oddish are active, while Nidoran and Bellsprout are fainted. The player is currently in the 'Choose a Pok\u00e9mon' party menu during a battle on Route 1.",
-    "The player is currently in a wild battle against a Level 5 Caterpie on Route 1 with Pikachu at 12/26 HP."
+    "Yellow Recharged: Pok\u00e9 Balls available immediately at Viridian Mart with no parcel required to unlock."
   ],
-  "timestamp": 1791549159.9747834
+  "timestamp": 1791559827.4284678
 }

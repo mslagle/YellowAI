@@ -279,6 +279,18 @@ Analyze the screenshot and game state to choose an efficient sequence of actions
    - NEVER alternate between A and B in a loop.
    - If a menu offers an explicit 'Quit', 'Exit', 'Cancel', or 'Log Off' option (Poké Mart, PC, etc.), navigate the cursor arrow directly onto that option using the D-Pad (DOWN) and press A!
    - In overworld, if opened accidentally, press B to close.
+10. Character & Rival Naming Screen (CRITICAL):
+   - When on the keyboard naming screen (alphabet grid with letters, and header showing "Your name?" or "Your rival's name?"):
+   - TOP PRIORITY: CREATE A MEANINGFUL NAME FIRST! Do NOT press START immediately on a blank name!
+   - WHO IS BEING NAMED:
+     * Red cap sprite / "Your name?" = Player character (choose "RED", "YELLOW", or "ASH").
+     * Spiky hair sprite / "Your rival's name?" = Rival character (choose "BLUE" or "GARY").
+   - HOW TO TYPE & CONFIRM:
+     * Navigate with D-Pad, press A on letters to spell out your chosen name.
+     * Press B to delete/backspace if you make a mistake.
+     * Press SELECT to toggle between UPPERCASE and lowercase.
+     * ONLY ONCE YOUR NAME IS TYPED: Press START ('[OK] START▶') to submit the name!
+   - CONFIRMATION POPUP: When Oak asks "Are you OK with this name? Yes / No", the cursor defaults to Yes. Press A to confirm!
 
 ### Output Style
 - actions: Ordered list of 1 to 6 action steps to execute before the next observation.
@@ -309,6 +321,46 @@ A new battle has started or an enemy Pokémon has switched on screen!
    - Bag / Poké Ball: actions = ["RIGHT", "A", "A"]
    - Move PP Verification: Inspect remaining PP (PP xx/xx). NEVER choose a 0-PP move!
 4. State your 2-3 step gameplan in 'micro_step' so subsequent turns can execute swiftly!"""
+
+NAMING_SCREEN_GUIDANCE = """[KEYBOARD NAMING SCREEN DETECTED - PROFESSOR OAK INTRO]:
+You are on the GBA Character Naming Screen!
+
+TOP PRIORITY: CREATE A MEANINGFUL NAME FIRST!
+- DO NOT immediately press START on an empty name!
+- Do NOT worry about leaving the bedroom yet -- you must finish naming your character first!
+- Recommended Names:
+  * For Player (boy in red cap / "Your name?"): Choose "RED", "YELLOW", or "ASH".
+  * For Rival (boy with spiky hair / "Your rival's name?"): Choose "BLUE" or "GARY".
+  * For Pokémon ("Nickname?"): Pick a cool nickname.
+
+KEYBOARD LAYOUT & LETTER GRID (4 ROWS x 7 COLS):
+  Row 0: a  b  c    d  e  f    .
+  Row 1: g  h  i    j  k  l    ,
+  Row 2: m  n  o    p  q  r    s
+  Row 3: t  u  v    w  x  y    z
+- The cursor starts on 'a' (Row 0, Col 0).
+- CONTROLS:
+  * D-Pad (UP, DOWN, LEFT, RIGHT): Navigate between letters on the keyboard.
+  * A Button: Type the highlighted letter ('[Ok]').
+  * B Button: Backspace / delete previous letter ('[BACK] B BUTTON').
+  * SELECT Button: Switch character case ('[others] SELECT▶' toggles upper/lower case).
+  * START Button: Press START ONLY AFTER you have typed your chosen letters to submit [OK]!
+
+STEP-BY-STEP TYPING INSTRUCTIONS:
+1. Navigate with the D-Pad to each letter of your chosen name and press A to type it.
+   - Example to type "RED":
+     * Step 1: Move from 'a' (row 0, col 0) to 'r' (row 2, col 5) and press A: actions = ["DOWN", "DOWN", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "A"]
+     * Step 2: Move to 'e' (row 0, col 4) and press A: actions = ["UP", "UP", "LEFT", "A"]
+     * Step 3: Move to 'd' (row 0, col 3) and press A: actions = ["LEFT", "A"]
+     * Step 4: Now that 'RED' is typed, press START to confirm [OK]: actions = ["START"]
+   - Example to type "ASH":
+     * Step 1: 'a' is already selected! Press A to type 'a': actions = ["A"]
+     * Step 2: Move to 's' (row 2, col 6) and press A: actions = ["DOWN", "DOWN", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "RIGHT", "A"]
+     * Step 3: Move to 'h' (row 1, col 1) and press A: actions = ["UP", "LEFT", "LEFT", "LEFT", "LEFT", "LEFT", "A"]
+     * Step 4: Now press START to submit: actions = ["START"]
+2. CONFIRMATION POPUP ("Are you OK with this name? Yes / No"):
+   - When Professor Oak asks for confirmation, cursor defaults to 'Yes'. Press A to confirm: actions = ["A"]!"""
+
 
 
 def build_turn_prompt(

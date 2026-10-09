@@ -39,7 +39,9 @@ from config import (
     LAST_CAPTURE_FILE,
     LLM_BACKEND,
     OLLAMA_BASE_URL,
-    OLLAMA_MODEL_ID
+    OLLAMA_MODEL_ID,
+    BIONIC_BASE_URL,
+    BIONIC_MODEL_ID
 )
 from core.logger import setup_logging
 from core.game_loop import GameLoop
@@ -115,12 +117,14 @@ def reset_memory():
 
 def main():
     parser = argparse.ArgumentParser(description="YellowAI: Autonomous Pokémon Yellow Recharged Player")
-    parser.add_argument("--backend", type=str, choices=["gemini", "ollama"], default=LLM_BACKEND, help="Intelligence backend: 'gemini' (cloud) or 'ollama' (free local VLM).")
+    parser.add_argument("--backend", type=str, choices=["gemini", "ollama", "bionic", "lmstudio"], default=LLM_BACKEND, help="Intelligence backend: 'gemini' (cloud), 'ollama' (free local VLM), or 'bionic'/'lmstudio' (local server at port 1234).")
     parser.add_argument("--max-turns", type=int, default=None, help="Maximum turns to run before stopping.")
     parser.add_argument("--no-tts", action="store_true", help="Disable TTS audio commentary.")
     parser.add_argument("--model", type=str, default=GEMINI_MODEL_ID, help="Gemini model ID to use (when backend=gemini).")
-    parser.add_argument("--ollama-model", type=str, default=OLLAMA_MODEL_ID, help="Ollama model ID to use (default: qwen2.5-vl:7b).")
+    parser.add_argument("--ollama-model", type=str, default=OLLAMA_MODEL_ID, help="Ollama model ID to use (default: qwen3.5).")
     parser.add_argument("--ollama-url", type=str, default=OLLAMA_BASE_URL, help="Ollama base URL (default: http://localhost:11434).")
+    parser.add_argument("--bionic-url", type=str, default=BIONIC_BASE_URL, help="Bionic / LM Studio base URL (default: http://localhost:1234/v1).")
+    parser.add_argument("--bionic-model", type=str, default=BIONIC_MODEL_ID, help="Bionic / LM Studio model ID (default: 'default', auto-detects loaded model).")
     parser.add_argument("--test-tts", action="store_true", help="Test local TTS audio synthesis and playback.")
     parser.add_argument("--test-capture", action="store_true", help="Capture a single frame and save to debug folder.")
     parser.add_argument("--test-input", action="store_true", help="Send a test button press to the emulator.")
@@ -178,7 +182,24 @@ def main():
     api_key = ""
 
     # 2. Check Backend Prerequisites
-    if backend == "ollama":
+    if backend in ["bionic", "lmstudio"]:
+        print(f"[YellowAI] Verifying local Bionic / LM Studio service at {args.bionic_url}...")
+        from agent.bionic_player import BionicPlayer
+        bionic_checker = BionicPlayer(base_url=args.bionic_url, model_id=args.bionic_model)
+        if not bionic_checker.is_server_reachable():
+            print("\n" + "!" * 65)
+            print(" [ERROR] Local Bionic / LM Studio service is not running or not reachable!")
+            print(f" URL: {args.bionic_url}")
+            print(" Please launch LM Studio / Bionic and start the Local Server on port 1234.")
+            print("!" * 65 + "\n")
+            sys.exit(1)
+
+        loaded_models = bionic_checker.get_loaded_models()
+        if loaded_models:
+            print(f"[YellowAI] Connected to local server. Loaded models: {loaded_models}")
+        else:
+            print("[YellowAI] Connected to local server. (Ensure a vision model is loaded in LM Studio / Bionic!)")
+    elif backend == "ollama":
         print(f"[YellowAI] Verifying local Ollama service at {args.ollama_url}...")
         from agent.ollama_player import OllamaPlayer
         checker_player = OllamaPlayer(base_url=args.ollama_url, model_id=args.ollama_model)
@@ -202,7 +223,7 @@ def main():
             print("\n" + "!" * 65)
             print(" [ERROR] GEMINI_API_KEY is not set!")
             print(" Please edit the .env file in m:\\Code\\YellowAI and set your GEMINI_API_KEY.")
-            print(" Or run YellowAI with your 100% free local model: python main.py --backend ollama")
+            print(" Or run YellowAI with a 100% free local model: python main.py --backend bionic")
             print("!" * 65 + "\n")
             sys.exit(1)
 
@@ -212,6 +233,8 @@ def main():
         backend=backend,
         ollama_base_url=args.ollama_url,
         ollama_model_id=args.ollama_model,
+        bionic_base_url=args.bionic_url,
+        bionic_model_id=args.bionic_model,
         turn_settle_delay=args.turn_delay,
         enable_tts=not args.no_tts
     )

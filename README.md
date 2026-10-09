@@ -95,21 +95,35 @@ python main.py
 ```
 
 ### Useful CLI Options
-- `--backend <gemini|ollama>`: Choose intelligence backend (`gemini` for cloud, `ollama` for 100% free local VLM).
-- `--ollama-model <MODEL>`: Local model ID (defaults to `qwen2.5-vl:7b`).
+- `--backend <gemini|ollama|bionic|lmstudio>`: Choose intelligence backend (`gemini` for cloud, `ollama` for Ollama local VLM, or `bionic`/`lmstudio` for local server on port 1234).
+- `--ollama-model <MODEL>`: Local Ollama model ID (defaults to `qwen3.5`).
+- `--bionic-url <URL>`: Local OpenAI-compatible server URL (defaults to `http://localhost:1234/v1`).
 - `--max-turns <N>`: Run for a set number of turns (e.g. `python main.py --max-turns 100`).
 - `--no-tts`: Run silently without audio commentary.
 - `--reset-memory`: Reset stored short, medium, and long-term memory back to Pallet Town defaults.
 - `--model <MODEL_ID>`: Override Gemini model (defaults to `gemini-3.5-flash`).
 
-### 🦙 Running 100% Free with Local Models (Ollama)
-Pull a Vision-Language Model in Ollama:
+### 🦙 Running 100% Free with Local Models (Ollama or LM Studio / Bionic)
+
+**Option A: Ollama**
+Pull the multimodal Qwen 3.5 model in Ollama:
 ```bash
-ollama run qwen2.5-vl:7b
+ollama run qwen3.5
 ```
-Then run YellowAI with zero token costs:
+*(Or for faster turns on lighter VRAM: `ollama run qwen3.5:4b`)*
+
+Run YellowAI with Ollama:
 ```bash
 python main.py --backend ollama
+```
+
+**Option B: LM Studio / Bionic (Port 1234)**
+1. Open LM Studio or your local OpenAI-compatible server.
+2. Load any Vision-capable model (e.g. Qwen2.5-VL, Qwen3.5-VL, or Llama-3.2-Vision).
+3. Start the Local Server on port `1234`.
+4. Launch YellowAI:
+```bash
+python main.py --backend bionic
 ```
 
 ---
