@@ -153,17 +153,17 @@ class AntiStuckWatchdog:
             warp_dir = self.last_warp_direction or "DOWN"
             if warp_dir == "DOWN":
                 alert = (
-                    "[DOORWAY TRANSITION ALERT]: You JUST stepped outside through a doorway to the SOUTH!\n"
+                    "[DOORWAY TRANSITION ALERT]: You JUST emerged outside through a doorway to the SOUTH!\n"
                     "- The entrance door back inside is directly behind you (NORTH)!\n"
-                    "- DO NOT press UP! Pressing UP walks straight back into the building!\n"
-                    "- Step DOWN away from the door, then turn orthogonal (LEFT or RIGHT) into open paths!"
+                    "- DO NOT select 'EXPLORE_NORTH'! Walking north re-enters the doorway immediately!\n"
+                    "- Choose 'EXPLORE_SOUTH' or 'EXPLORE_EAST' to clear the entrance threshold into open paths!"
                 )
             else:  # UP
                 alert = (
                     "[DOORWAY TRANSITION ALERT]: You JUST stepped inside through a doorway to the NORTH!\n"
                     "- The exit door back outside is directly behind you (SOUTH)!\n"
-                    "- DO NOT press DOWN! Pressing DOWN walks right back outside!\n"
-                    "- Step UP into the room, then navigate toward your objective!"
+                    "- DO NOT select 'EXPLORE_SOUTH'! Walking south steps right back outside!\n"
+                    "- Choose 'EXIT_ROOM', 'GO_TO_POI', or navigate toward your indoor objective!"
                 )
             return True, alert
 
@@ -303,9 +303,9 @@ class AntiStuckWatchdog:
             recent6 = [r.button.upper() for r in dir_records[-6:]]
             if set(recent6) == {"LEFT", "RIGHT"} and recent6.count("LEFT") >= 2 and recent6.count("RIGHT") >= 2:
                 alert = (
-                    "[HORIZONTAL SWEEP ALERT]: Sweeping back and forth [LEFT] <-> [RIGHT] below an obstacle/ledge!\n"
-                    "- STOP sweeping left and right! You are trapped in a dead end below the ledge/trees!\n"
-                    "- If below the 2nd ledge with pine trees on your right: step DOWN (south) to the dirt road, follow the road EAST (RIGHT) past the 3 pine trees, then walk UP around the east side of the trees!"
+                    "[HORIZONTAL SWEEP ALERT]: Sweeping back and forth below an obstacle or ledge!\n"
+                    "- STOP oscillating east and west! You are caught in a cul-de-sac below the trees/ledge!\n"
+                    "- Choose 'EXPLORE_SOUTH' to clear the obstacles and return to the main path, or target a specific POI!"
                 )
                 return True, alert
 
@@ -319,21 +319,20 @@ class AntiStuckWatchdog:
                 doorway_hint = ""
                 if {r2, r1} == {"UP", "DOWN"}:
                     doorway_hint = (
-                        "\n- DOORWAY LOOP: You are ping-ponging inside and outside the house!\n"
-                        "- DO NOT press UP when below/in front of a door unless you want to enter!\n"
-                        "- If at Oak's Lab (southeast building), THIS IS NOT DAISY'S HOUSE! Walk LEFT around fence to reach Daisy's house in the northeast!"
+                        "\n- DOORWAY LOOP: You are ping-ponging inside and outside the threshold!\n"
+                        "- Do NOT alternate between entering and exiting! Step into the room or follow the road!"
                     )
-                    ortho_hint = "Turn orthogonal (perpendicular: LEFT or RIGHT) to break the loop."
+                    ortho_hint = "Choose an orthogonal direction ('EXPLORE_EAST' or 'EXPLORE_WEST') or 'ENTER_BUILDING' to break the loop."
                 else:  # {"LEFT", "RIGHT"}
                     doorway_hint = (
-                        "\n- If blocked above by a ledge or trees: you are trapped in a cul-de-sac!\n"
-                        "- Step DOWN to return to the open path/road, then follow the road past the trees!"
+                        "\n- If blocked above by a ledge or trees: you are trapped in a dead end!\n"
+                        "- Choose 'EXPLORE_SOUTH' to return to the open path/road!"
                     )
-                    ortho_hint = "Turn orthogonal (perpendicular: UP or DOWN) to break the loop."
+                    ortho_hint = "Choose an orthogonal direction ('EXPLORE_NORTH' or 'EXPLORE_SOUTH') to break the loop."
 
                 alert = (
-                    f"[OSCILLATION ALERT]: Ping-pong loop between [{r2}] <-> [{r1}].\n"
-                    f"- DO NOT press [{r2}] again (undoes progress into doorway/wall).{doorway_hint}\n"
+                    f"[OSCILLATION ALERT]: Reversal loop detected between recent movements.\n"
+                    f"- Break out of this back-and-forth pattern.{doorway_hint}\n"
                     f"- {ortho_hint}"
                 )
                 return True, alert
@@ -364,7 +363,7 @@ class AntiStuckWatchdog:
 
         lines = ["[Recent Actions]:"]
         for r in evaluated_records[-4:]:
-            lines.append(f"- T{r.turn_id}: [{r.button}] -> {r.outcome} | Reason: \"{r.reasoning}\"")
+            lines.append(f"- Turn {r.turn_id}: Intent=[{r.button}] -> {r.outcome} | \"{r.reasoning}\"")
 
         return "\n".join(lines)
 

@@ -37,6 +37,10 @@ class NavigationIntent(str, Enum):
     EXPLORE_SOUTH = "EXPLORE_SOUTH"      # Journey south along road or path
     EXPLORE_EAST = "EXPLORE_EAST"        # Journey east along road or path
     EXPLORE_WEST = "EXPLORE_WEST"        # Journey west along road or path
+    EXPLORE_NORTHEAST = "EXPLORE_NORTHEAST"  # Journey northeast
+    EXPLORE_NORTHWEST = "EXPLORE_NORTHWEST"  # Journey northwest
+    EXPLORE_SOUTHEAST = "EXPLORE_SOUTHEAST"  # Journey southeast
+    EXPLORE_SOUTHWEST = "EXPLORE_SOUTHWEST"  # Journey southwest
     TALK_TO_NPC = "TALK_TO_NPC"          # Approach and speak to NPC
     ADVANCE_DIALOGUE = "ADVANCE_DIALOGUE"# Advance/dismiss dialogue or text on screen
     OPEN_MENU = "OPEN_MENU"              # Open Start menu
@@ -54,7 +58,7 @@ class BattleActionType(str, Enum):
 class StandardTurnResponse(BaseModel):
     intent: NavigationIntent = Field(
         default=NavigationIntent.EXIT_ROOM,
-        description="High-level intent: EXIT_ROOM, ENTER_BUILDING, GO_TO_POI, EXPLORE_NORTH, EXPLORE_SOUTH, EXPLORE_EAST, EXPLORE_WEST, TALK_TO_NPC, ADVANCE_DIALOGUE, BATTLE_ACTION, WAIT."
+        description="High-level intent: EXIT_ROOM, ENTER_BUILDING, GO_TO_POI, EXPLORE_NORTH, EXPLORE_SOUTH, EXPLORE_EAST, EXPLORE_WEST, EXPLORE_NORTHEAST, EXPLORE_NORTHWEST, EXPLORE_SOUTHEAST, EXPLORE_SOUTHWEST, TALK_TO_NPC, ADVANCE_DIALOGUE, BATTLE_ACTION, WAIT."
     )
     target_poi: Optional[str] = Field(
         default=None,
@@ -118,10 +122,6 @@ class StandardTurnResponse(BaseModel):
     dialogue_text: Optional[str] = Field(
         default=None,
         description="If a speech bubble or dialogue window is open on screen, transcribe the exact words spoken or displayed."
-    )
-    actions: Optional[List[str]] = Field(
-        default=None,
-        description="Optional legacy fallback field (handled by local movement controller)."
     )
 
 

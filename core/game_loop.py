@@ -155,9 +155,28 @@ class GameLoop:
         scene = self.screen_analyzer.analyze(frame, current_area_hint=self.memory_manager.current_area)
         self.memory_manager.current_area = scene.area_description
 
-        # Transition quests upon leaving naming screen
-        if scene.area_type == "BEDROOM_2F" and "bedroom" not in (self.memory_manager.priority_quest or "").lower():
+        # Transition quests upon room movement
+        current_prio = (self.memory_manager.priority_quest or "").lower()
+        current_micro = (self.memory_manager.micro_step or "").lower()
+        if scene.area_type == "BEDROOM_2F" and "bedroom" not in current_prio:
             self.memory_manager.set_priority_quest("Leave Red's bedroom, go downstairs, and talk to Mom")
+        elif scene.area_type == "LIVING_ROOM_1F":
+            if "bedroom" in current_prio or "go downstairs" in current_prio:
+                notes_text = " ".join(self.memory_manager.knowledge_notes).lower()
+                if "professor oak" in notes_text or "oak" in notes_text:
+                    self.memory_manager.set_priority_quest("Exit house through front door to Pallet Town, then visit Professor Oak's Lab")
+                    self.memory_manager.update_micro_step("Exit house through the front door mat at the bottom.")
+                else:
+                    self.memory_manager.set_priority_quest("Talk to Mom in the living room, then exit the house")
+        elif scene.area_type == "OVERWORLD":
+            # Complete any indoor exit quest once outside in Pallet Town
+            for q in list(self.memory_manager.quests):
+                if "exit house" in q.lower() or "living room" in q.lower() or "bedroom" in q.lower():
+                    self.memory_manager.complete_quest(q)
+            if "bedroom" in current_prio or "living room" in current_prio or "exit house" in current_prio:
+                self.memory_manager.set_priority_quest("Visit Professor Oak's Lab in southeast Pallet Town to choose starter Pokémon")
+            if any(k in current_micro for k in ["front door", "exit house", "starter table", "downstairs", "bedroom"]):
+                self.memory_manager.update_micro_step("Walk southeast around the fence to Professor Oak's Lab entrance.")
 
         if scene.is_battle or self.in_battle:
             self.in_battle = True
@@ -247,6 +266,13 @@ class GameLoop:
                     print("\n[SAFEGUARD TRIGGERED] Failed to capture frame from emulator.")
                     print("Gemini API call canceled. Stopping game loop.")
                     break
+
+                # If caught mid-doorway black fade transition, wait for fade-in to finish
+                if thumb is not None and float(thumb.mean()) < 22.0:
+                    time.sleep(0.6)
+                    re_frame, re_thumb = self.screen_capture.capture_frame()
+                    if re_frame is not None:
+                        frame, thumb = re_frame, re_thumb
 
                 latest_frame = frame
 
@@ -487,6 +513,8 @@ class GameLoop:
                     if not executed_actions and planned:
                         executed_actions = planned
                     print(f"[Movement Planned]: Route={move_res.get('target', '')} ({len(planned)} buttons: {' -> '.join(planned)})")
+                    if move_res.get("interrupt_reason") == "SCENE_WARP_OR_BATTLE":
+                        time.sleep(0.6)
 
                 # Grab fresh frame after actions executed
                 latest_frame = frame
@@ -494,9 +522,8 @@ class GameLoop:
                 if fresh_frame is not None:
                     latest_frame = fresh_frame
 
-                # Record actions in anti-stuck watchdog
-                for act in executed_actions:
-                    self.anti_stuck.record_action(self.turn_id, act, reasoning, outcome="MOVED")
+                # Record high-level intent in anti-stuck watchdog
+                self.anti_stuck.record_action(self.turn_id, intent, reasoning, outcome="MOVED")
 
                 action_summary = " -> ".join(executed_actions) if executed_actions else "WAIT"
                 if len(executed_actions) > 1:

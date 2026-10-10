@@ -53,9 +53,9 @@ BIONIC_BASE_URL = os.getenv("BIONIC_BASE_URL", "http://localhost:1234/v1")
 BIONIC_MODEL_ID = os.getenv("BIONIC_MODEL_ID", "default")
 
 # Turn Timing and Delays (in seconds)
-BUTTON_HOLD_DURATION = 0.12     # GBA needs ~2-4 frames hold (60fps = ~16ms/frame)
-STEP_SETTLE_DELAY = float(os.getenv("STEP_SETTLE_DELAY", "0.18"))  # Paced delay between button presses within a multi-action batch
-TURN_SETTLE_DELAY = float(os.getenv("TURN_SETTLE_DELAY", "0.25"))  # Paced delay between turns (default: 0.25s)
+BUTTON_HOLD_DURATION = float(os.getenv("BUTTON_HOLD_DURATION", "0.05"))  # ~3 frames hold at 60fps (~16.7ms/frame)
+STEP_SETTLE_DELAY = float(os.getenv("STEP_SETTLE_DELAY", "0.20"))        # Paced delay between button presses within a multi-action batch
+TURN_SETTLE_DELAY = float(os.getenv("TURN_SETTLE_DELAY", "0.25"))        # Paced delay between turns (default: 0.25s)
 MAX_BATCH_ACTIONS = int(os.getenv("MAX_BATCH_ACTIONS", "6"))       # Maximum steps in a batch action sequence
 ANTI_STUCK_CONSECUTIVE_THRESHOLD = 6  # If screen unchanged for N turns, take recovery step
 

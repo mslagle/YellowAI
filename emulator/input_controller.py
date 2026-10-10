@@ -11,13 +11,14 @@ from typing import Dict, Optional
 import pydirectinput
 
 pydirectinput.FAILSAFE = False
+pydirectinput.PAUSE = 0.0  # Disable default 100ms post-call pause so hold_duration is exact
 
 
 class InputController:
     def __init__(
         self,
         key_mappings: Dict[str, Optional[str]],
-        hold_duration: float = 0.12,
+        hold_duration: float = 0.05,
         target_hwnd: Optional[int] = None
     ):
         self.key_mappings = key_mappings

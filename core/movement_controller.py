@@ -142,6 +142,11 @@ class MovementController:
 
         # 1. EXIT_ROOM: Target the primary warp exit in the room
         if intent == "EXIT_ROOM":
+            if scene.area_type == "LIVING_ROOM_1F":
+                for poi in scene.pois:
+                    if poi.name == "FRONT_DOOR":
+                        return poi.interaction_tile[0], poi.interaction_tile[1], poi.name
+                return 2, 9, "FRONT_DOOR"
             for poi in scene.pois:
                 if poi.category == "WARP":
                     return poi.interaction_tile[0], poi.interaction_tile[1], poi.name
@@ -149,7 +154,7 @@ class MovementController:
             if scene.area_type == "BEDROOM_2F":
                 return 9, 4, "STAIRS_DOWN"
             elif scene.area_type == "LIVING_ROOM_1F":
-                return 4, 7, "FRONT_DOOR"
+                return 2, 9, "FRONT_DOOR"
             elif scene.area_type == "OAKS_LAB":
                 return 5, 8, "LAB_EXIT"
             elif scene.area_type == "POKECENTER":
@@ -157,12 +162,21 @@ class MovementController:
             elif scene.area_type == "POKEMART":
                 return 4, 8, "MART_EXIT"
 
-        # 2. GO_TO_POI / TALK_TO_NPC: Look up specific POI
-        if intent in ("GO_TO_POI", "TALK_TO_NPC") and target_poi_name:
+        # 2. GO_TO_POI / TALK_TO_NPC / ENTER_BUILDING: Look up specific POI first
+        if intent in ("GO_TO_POI", "TALK_TO_NPC", "ENTER_BUILDING") and target_poi_name:
             t_upper = target_poi_name.upper().strip()
+            if scene.area_type == "LIVING_ROOM_1F" and any(k in t_upper for k in ["DOOR", "EXIT", "OUTSIDE"]):
+                for poi in scene.pois:
+                    if poi.name == "FRONT_DOOR":
+                        return poi.interaction_tile[0], poi.interaction_tile[1], poi.name
+                return 2, 9, "FRONT_DOOR"
             for poi in scene.pois:
                 if t_upper in poi.name.upper() or poi.name.upper() in t_upper:
                     return poi.interaction_tile[0], poi.interaction_tile[1], poi.name
+            if any(k in t_upper for k in ["LAB", "OAK", "DOOR", "BUILDING"]):
+                for poi in scene.pois:
+                    if poi.category == "WARP":
+                        return poi.interaction_tile[0], poi.interaction_tile[1], poi.name
 
             # If TALK_TO_NPC and no specific name matched, pick nearest NPC
             if intent == "TALK_TO_NPC":
@@ -175,13 +189,13 @@ class MovementController:
             direction = intent.split("_")[-1]
             return self._find_furthest_walkable_tile(direction, (p.tile_col, p.tile_row), scene.collision_grid)
 
-        # 4. ENTER_BUILDING: Look for building entrance / warp door
-        if intent == "ENTER_BUILDING":
+        # 4. ENTER_BUILDING / GO_TO_POI fallback: Look for building entrance / warp door
+        if intent in ("ENTER_BUILDING", "GO_TO_POI"):
             for poi in scene.pois:
                 if poi.category == "WARP":
                     return poi.interaction_tile[0], poi.interaction_tile[1], poi.name
-            # In overworld, walk NORTH towards building door
-            return self._find_furthest_walkable_tile("NORTH", (p.tile_col, p.tile_row), scene.collision_grid)
+            # Fallback to directional exploration
+            return self._find_furthest_walkable_tile("SOUTH", (p.tile_col, p.tile_row), scene.collision_grid)
 
         return None
 
@@ -191,29 +205,118 @@ class MovementController:
         start_tile: Tuple[int, int],
         grid: np.ndarray
     ) -> Tuple[int, int, str]:
-        """Scans in the cardinal direction to find the furthest walkable tile up to 4 tiles away."""
+        """
+        Finds the best reachable walkable tile in the requested cardinal or intercardinal (diagonal) direction.
+        Supports: NORTH, SOUTH, EAST, WEST, NORTHEAST, NORTHWEST, SOUTHEAST, SOUTHWEST.
+        If a fence, wall, or tree blocks the straight line within 3 tiles, automatically selects
+        a reachable tile further in that direction around the obstacle so A* routes cleanly around it!
+        """
         sc, sr = start_tile
-        vectors = {
-            "NORTH": (0, -1),
-            "SOUTH": (0, 1),
-            "WEST": (-1, 0),
-            "EAST": (1, 0)
-        }
-        dc, dr = vectors.get(direction.upper(), (0, 0))
-        target_c, target_r = sc, sr
+        dir_upper = direction.upper().strip()
+        is_diagonal = dir_upper in ("NORTHEAST", "NORTHWEST", "SOUTHEAST", "SOUTHWEST")
 
-        for step in range(1, 5):
-            nc = sc + dc * step
-            nr = sr + dr * step
-            if 0 <= nc < GRID_COLS and 0 <= nr < GRID_ROWS:
-                if grid[nr, nc] == CELL_WALKABLE:
-                    target_c, target_r = nc, nr
+        if not is_diagonal:
+            vectors = {
+                "NORTH": (0, -1),
+                "SOUTH": (0, 1),
+                "WEST": (-1, 0),
+                "EAST": (1, 0)
+            }
+            dc, dr = vectors.get(dir_upper, (0, 0))
+            target_c, target_r = sc, sr
+            straight_steps = 0
+
+            for step in range(1, 5):
+                nc = sc + dc * step
+                nr = sr + dr * step
+                if 0 <= nc < GRID_COLS and 0 <= nr < GRID_ROWS:
+                    if grid[nr, nc] == CELL_WALKABLE:
+                        target_c, target_r = nc, nr
+                        straight_steps = step
+                    else:
+                        break
                 else:
                     break
-            else:
-                break
 
-        return target_c, target_r, f"EXPLORE_{direction}"
+            next_c = sc + dc * (straight_steps + 1)
+            next_r = sr + dr * (straight_steps + 1)
+            blocked_ahead = (
+                straight_steps < 4
+                and 0 <= next_c < GRID_COLS
+                and 0 <= next_r < GRID_ROWS
+                and grid[next_r, next_c] != CELL_WALKABLE
+            )
+
+            if not blocked_ahead and straight_steps >= 3:
+                return target_c, target_r, f"EXPLORE_{dir_upper}"
+        else:
+            target_c, target_r = sc, sr
+
+        # Find the best reachable tile in the target cardinal or diagonal quadrant via A*
+        best_candidate = None
+        best_score = -9999.0
+
+        for r in range(GRID_ROWS):
+            for c in range(GRID_COLS):
+                if (c, r) == start_tile or grid[r, c] != CELL_WALKABLE:
+                    continue
+
+                if dir_upper == "SOUTH":
+                    advance = r - sr
+                    ortho = abs(c - sc)
+                    corridor_open = (r == 0 or grid[r - 1, c] == CELL_WALKABLE) and (r <= 1 or grid[r - 2, c] == CELL_WALKABLE)
+                    east_bias = 4.0 if c > sc else 0.0
+                    max_adv = 5
+                elif dir_upper == "NORTH":
+                    advance = sr - r
+                    ortho = abs(c - sc)
+                    corridor_open = (r == GRID_ROWS - 1 or grid[r + 1, c] == CELL_WALKABLE)
+                    east_bias = 0.0
+                    max_adv = 5
+                elif dir_upper == "EAST":
+                    advance = c - sc
+                    ortho = abs(r - sr)
+                    corridor_open = (c == 0 or grid[r, c - 1] == CELL_WALKABLE)
+                    east_bias = 0.0
+                    max_adv = 5
+                elif dir_upper == "WEST":
+                    advance = sc - c
+                    ortho = abs(r - sr)
+                    corridor_open = (c == GRID_COLS - 1 or grid[r, c + 1] == CELL_WALKABLE)
+                    east_bias = 0.0
+                    max_adv = 5
+                elif dir_upper in ("SOUTHEAST", "SOUTHWEST", "NORTHEAST", "NORTHWEST"):
+                    dx = (c - sc) if "EAST" in dir_upper else (sc - c)
+                    dy = (r - sr) if "SOUTH" in dir_upper else (sr - r)
+                    if dx <= 0 or dy <= 0:
+                        continue
+                    advance = dx + dy
+                    ortho = abs(dx - dy)
+                    corridor_open = True
+                    east_bias = min(dx, dy) * 3.0
+                    max_adv = 10
+                else:
+                    continue
+
+                if advance <= 0 or advance > max_adv:
+                    continue
+                if not corridor_open:
+                    continue
+
+                path = self.find_path(grid, start_tile, (c, r))
+                if not path or len(path) <= 1 or len(path) > 13:
+                    continue
+
+                # Score: maximize advance in desired direction, prefer balanced diagonal / open corridors
+                score = (advance * 10.0) - (ortho * 1.2) - (len(path) * 0.3) + east_bias
+                if score > best_score:
+                    best_score = score
+                    best_candidate = (c, r)
+
+        if best_candidate is not None:
+            return best_candidate[0], best_candidate[1], f"EXPLORE_{dir_upper}"
+
+        return target_c, target_r, f"EXPLORE_{dir_upper}"
 
     # -------------------------------------------------------------------------
     # Waypoints to GBA Buttons Converter
