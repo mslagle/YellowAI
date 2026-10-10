@@ -191,7 +191,7 @@ A fast local NumPy collision and pathfinding motor controller analyzes the tile 
    - `GO_TO_POI`: Pathfind to specific POI or object (set `target_poi` e.g. 'STAIRS_DOWN', 'PC').
    - `EXPLORE_NORTH`, `EXPLORE_SOUTH`, `EXPLORE_EAST`, `EXPLORE_WEST`: Advance along open roads or paths.
    - `TALK_TO_NPC`: Approach and speak to NPC (set `target_poi` e.g. 'MOM', 'NURSE_JOY', 'OAK').
-   - `ADVANCE_DIALOGUE`: Clear/advance dialogue window when text is on screen.
+   - `ADVANCE_DIALOGUE`: When a speech bubble or dialogue window is OPEN on screen, choose `ADVANCE_DIALOGUE` to advance the text (with A button)! Carefully inspect the focused speech bubble crop and transcribe the exact words into `dialogue_text`.
    - `BATTLE_ACTION`: Choose strategy when in battle (FIGHT, BAG, SWITCH_POKEMON, RUN).
    - `WAIT`: Pause 1 turn for screen animation or cutscene.
 2. Battle Strategy (when screen is in BATTLE mode):
@@ -207,8 +207,9 @@ A fast local NumPy collision and pathfinding motor controller analyzes the tile 
    - Update `thought`: exactly 1 expressive, punchy sentence for livestream commentary TTS.
 
 ### Output Style:
-- intent: NavigationIntent (e.g. 'EXIT_ROOM', 'GO_TO_POI', 'EXPLORE_NORTH', 'BATTLE_ACTION')
+- intent: NavigationIntent (e.g. 'EXIT_ROOM', 'GO_TO_POI', 'ADVANCE_DIALOGUE', 'EXPLORE_NORTH', 'BATTLE_ACTION')
 - target_poi: Specific POI or warp name (or null)
+- dialogue_text: Exact transcribed text from on-screen speech bubble (or null)
 - battle_action: 'FIGHT', 'BAG', 'SWITCH_POKEMON', or 'RUN' (when in battle)
 - move_slot: 1 to 4 (when battle_action is 'FIGHT')
 - reasoning: 3 to 6 words explaining the plan

@@ -110,6 +110,7 @@ class OllamaPlayer:
         mode_hint: str = "",
         battle_thinking_budget: Optional[int] = None,
         battle_advisor_prompt: str = "",
+        dialogue_crop: Optional[Image.Image] = None,
         emulator_verified: bool = False
     ) -> Dict[str, Any]:
         """
@@ -143,6 +144,11 @@ class OllamaPlayer:
             previous_image.save(prev_buffer, format="JPEG", quality=85)
             images_list.append(base64.b64encode(prev_buffer.getvalue()).decode("utf-8"))
         images_list.append(img_b64)
+
+        if dialogue_crop is not None:
+            crop_buffer = io.BytesIO()
+            dialogue_crop.convert("RGB").save(crop_buffer, format="JPEG", quality=95)
+            images_list.append(base64.b64encode(crop_buffer.getvalue()).decode("utf-8"))
 
         payload = {
             "model": self.model_id,

@@ -20,6 +20,27 @@ from PIL import Image, ImageDraw, ImageFont
 GRID_COLS = 15      # 480 / 32 = 15 columns
 GRID_ROWS = 10      # 320 / 32 = 10 rows
 TILE_SIZE = 32      # 32x32 pixels per tile
+GRID_Y_OFFSET = 16  # 16px vertical alignment offset (50% tile shift matching GBA camera tile centering)
+
+
+def pixel_to_tile(px: int, py: int) -> Tuple[int, int]:
+    """Converts a screen pixel coordinate to a grid (col, row) with the 16px GBA camera offset."""
+    col = max(0, min(GRID_COLS - 1, px // TILE_SIZE))
+    row = max(0, min(GRID_ROWS - 1, (py - GRID_Y_OFFSET) // TILE_SIZE))
+    return col, row
+
+
+def tile_to_pixel_center(col: int, row: int) -> Tuple[int, int]:
+    """Returns the (x, y) pixel center of a grid tile with the 16px GBA camera offset."""
+    return col * TILE_SIZE + TILE_SIZE // 2, row * TILE_SIZE + GRID_Y_OFFSET + TILE_SIZE // 2
+
+
+def tile_bounds(col: int, row: int) -> Tuple[int, int, int, int]:
+    """Returns the (x1, y1, x2, y2) pixel bounding box of a grid tile."""
+    x1 = col * TILE_SIZE
+    y1 = row * TILE_SIZE + GRID_Y_OFFSET
+    return x1, y1, x1 + TILE_SIZE, y1 + TILE_SIZE
+
 
 # Cell Occupancy Types
 CELL_WALKABLE = 0
@@ -66,6 +87,8 @@ class SceneAnalysis:
     is_battle: bool = False
     is_dialogue: bool = False
     is_naming_screen: bool = False
+    dialogue_crop: Optional[Image.Image] = None
+    dialogue_has_arrow: bool = False
 
 
 class ScreenAnalyzer:
@@ -96,6 +119,22 @@ class ScreenAnalyzer:
         is_battle = self._is_battle_screen(arr)
         is_dialogue = self._is_dialogue_active(arr)
 
+        dialogue_crop = None
+        dialogue_has_arrow = False
+        if is_dialogue:
+            # Crop the speech bubble in 480x320: y: 215..310, x: 12..468
+            dialogue_crop = resized.crop((12, 215, 468, 310)).convert("RGB")
+            try:
+                crop_path = Path("logs/last_dialogue_crop.png")
+                crop_path.parent.mkdir(parents=True, exist_ok=True)
+                dialogue_crop.save(crop_path)
+            except Exception:
+                pass
+
+            # Detect red prompt triangle arrow inside the speech bubble
+            arrow_mask = (arr[218:310, 12:468, 0] > 180) & (arr[218:310, 12:468, 1] < 70) & (arr[218:310, 12:468, 2] < 70)
+            dialogue_has_arrow = bool(np.sum(arrow_mask) > 15)
+
         # 2. Player localization
         player = self._detect_player(arr)
 
@@ -121,9 +160,6 @@ class ScreenAnalyzer:
             area_desc = "Character / Rival Naming Keyboard"
             notes.append("Naming Keyboard Screen: Entering character name.")
             available_intents = ["WAIT", "ADVANCE_DIALOGUE"]
-        elif is_dialogue:
-            notes.append("Dialogue or text box is active on screen. Press A to advance dialogue.")
-            available_intents = ["ADVANCE_DIALOGUE", "EXIT_ROOM"]
         else:
             # Map-specific collision & POI extraction
             if area_type == "BEDROOM_2F":
@@ -139,6 +175,16 @@ class ScreenAnalyzer:
             else:
                 self._analyze_overworld(arr, collision_grid, player, pois, notes, available_intents)
 
+            if is_dialogue:
+                arrow_status = "Waiting for player input (Press A to advance)" if dialogue_has_arrow else "Text is rendering"
+                notes.insert(0, f"Speech bubble / dialogue box is OPEN on screen [{arrow_status}]. Choose 'ADVANCE_DIALOGUE' to proceed.")
+                if "ADVANCE_DIALOGUE" not in available_intents:
+                    available_intents.insert(0, "ADVANCE_DIALOGUE")
+                # Mark dialogue box rows as impassable
+                for r in range(7, GRID_ROWS):
+                    for c in range(GRID_COLS):
+                        collision_grid[r, c] = CELL_OBSTACLE
+
         analysis = SceneAnalysis(
             area_type=area_type,
             area_description=area_desc,
@@ -149,7 +195,9 @@ class ScreenAnalyzer:
             spatial_notes=notes,
             is_battle=is_battle,
             is_dialogue=is_dialogue,
-            is_naming_screen=is_naming
+            is_naming_screen=is_naming,
+            dialogue_crop=dialogue_crop,
+            dialogue_has_arrow=dialogue_has_arrow
         )
 
         if self.debug_poi_path:
@@ -189,11 +237,11 @@ class ScreenAnalyzer:
         """Checks if a white bottom dialogue box with dark text is on screen."""
         try:
             dialogue_area = arr[230:300, 20:460, :]
-            # Dialogue box interior is mostly pure white (> 240)
-            white_pixels = np.mean((dialogue_area[:, :, 0] > 230) & (dialogue_area[:, :, 1] > 230) & (dialogue_area[:, :, 2] > 230))
-            # Border is dark/black
-            border_dark = np.mean(arr[220:225, 20:460, :] < 50) > 0.5
-            return bool(white_pixels > 0.45 and border_dark)
+            # Dialogue box interior is mostly pure white (> 220)
+            white_pixels = np.mean((dialogue_area[:, :, 0] > 220) & (dialogue_area[:, :, 1] > 220) & (dialogue_area[:, :, 2] > 220))
+            # Border is dark/grey (< 130)
+            border_dark = np.mean(arr[220:230, 20:460, :] < 130) > 0.4
+            return bool(white_pixels > 0.40 and border_dark)
         except Exception:
             return False
 
@@ -223,13 +271,23 @@ class ScreenAnalyzer:
 
         # Flooring signatures
         # 1. Tatami floor (Tan / Yellowish-brown) & Green rug (Red's 2F Bedroom)
-        tatami = (upper[:, :, 0] > 140) & (upper[:, :, 1] > 120) & (upper[:, :, 2] < 110)
-        green_rug = (upper[:, :, 0] < 130) & (upper[:, :, 1] > 130) & (upper[:, :, 2] > 70)
+        # Inspect rows 4-7 (y = 120 to 224) where bedroom floor is located
+        mid_floor = arr[120:230, :]
+        tatami = (mid_floor[:, :, 0] > 140) & (mid_floor[:, :, 1] > 120) & (mid_floor[:, :, 2] < 110)
+        green_rug = (mid_floor[:, :, 0] < 140) & (mid_floor[:, :, 1] > 140) & (mid_floor[:, :, 2] < 150)
         tatami_score = float(np.mean(tatami) + np.mean(green_rug))
 
+        # Check for orange staircase landing mat (Gen 3 / Yellow Recharged Bedroom)
+        mat_orange = (
+            (arr[:, :, 0] > 190) &
+            (arr[:, :, 1] > 110) & (arr[:, :, 1] < 165) &
+            (arr[:, :, 2] > 70) & (arr[:, :, 2] < 125)
+        )
+        has_bedroom_stairs = int(np.sum(mat_orange & (np.arange(h)[:, None] < 230))) > 50
+
         is_bedroom = (
-            (tatami_score > 0.05 and (total_void > 0.25 or north_void or east_void))
-            or (total_void > 0.35 and tatami_score > 0.03)
+            has_bedroom_stairs
+            or (tatami_score > 0.10 and (total_void > 0.15 or north_void or east_void))
             or ("bedroom" in area_hint.lower())
         )
         if is_bedroom:
@@ -283,16 +341,25 @@ class ScreenAnalyzer:
     def _detect_player(self, arr: np.ndarray) -> PlayerState:
         """Finds Red's sprite via red cap color and determines facing direction."""
         cap_mask = (arr[:, :, 0] > 175) & (arr[:, :, 1] < 105) & (arr[:, :, 2] < 105)
-        y_idx, x_idx = np.where(cap_mask)
 
-        if len(y_idx) < 15:
-            return PlayerState(detected=False)
+        # Prioritize central screen viewport where player camera is centered
+        center_mask = cap_mask[80:230, 160:320]
+        cy, cx = np.where(center_mask)
+        if len(cy) >= 15:
+            py = int(np.median(cy)) + 80
+            px = int(np.median(cx)) + 160
+        else:
+            y_idx, x_idx = np.where(cap_mask)
+            if len(y_idx) < 15:
+                return PlayerState(detected=False)
+            py = int(np.median(y_idx))
+            px = int(np.median(x_idx))
 
-        py = int(np.median(y_idx))
-        px = int(np.median(x_idx))
-
-        col = max(0, min(GRID_COLS - 1, px // TILE_SIZE))
-        row = max(0, min(GRID_ROWS - 1, py // TILE_SIZE))
+        # Ground collision tracking by FEET:
+        # In GBA Pokémon, Red's sprite is 16x32 (feet are at ground collision level ~22px below cap center).
+        # We determine Red's tile based on where his feet are planted on the ground!
+        feet_py = py + 22
+        col, row = pixel_to_tile(px, feet_py)
 
         # Determine facing direction by inspecting sprite patch below cap
         h, w, _ = arr.shape
@@ -322,7 +389,7 @@ class ScreenAnalyzer:
         return PlayerState(
             detected=True,
             pixel_x=px,
-            pixel_y=py,
+            pixel_y=feet_py,
             tile_col=col,
             tile_row=row,
             facing=facing
@@ -333,12 +400,17 @@ class ScreenAnalyzer:
     # -------------------------------------------------------------------------
     def _populate_void_cells(self, arr: np.ndarray, grid: np.ndarray):
         """Marks cells covered by black void as CELL_VOID (impassable)."""
+        h, w, _ = arr.shape
         for r in range(GRID_ROWS):
             for c in range(GRID_COLS):
-                cell_patch = arr[r * TILE_SIZE:(r + 1) * TILE_SIZE, c * TILE_SIZE:(c + 1) * TILE_SIZE]
-                black_ratio = np.mean(cell_patch < 25)
-                if black_ratio > 0.70:
-                    grid[r, c] = CELL_VOID
+                x1, y1, x2, y2 = tile_bounds(c, r)
+                y1_c, y2_c = max(0, y1), min(h, y2)
+                x1_c, x2_c = max(0, x1), min(w, x2)
+                if y2_c > y1_c and x2_c > x1_c:
+                    cell_patch = arr[y1_c:y2_c, x1_c:x2_c]
+                    black_ratio = np.mean(cell_patch < 25)
+                    if black_ratio > 0.70:
+                        grid[r, c] = CELL_VOID
 
     # -------------------------------------------------------------------------
     # Map-Specific Analyzers
@@ -353,89 +425,155 @@ class ScreenAnalyzer:
         available_intents: List[str]
     ):
         """Analyzes Red's 2F Bedroom fixtures: stairs, railing, bed, TV, PC, void borders."""
-        # 1. Stairs Landing Mat (Orange mat in top-right)
+        # 1. Stairs Landing Mat (Orange mat at foot of stairs)
+        # Signature: Warm orange/brown [231, 140, 99], tile average [185, 135, 88]
+        # Strictly enforce y >= 112 px (Row 3 or lower): The mat is on the floor, NEVER on the North Wall (y < 112)!
+        y_coords = np.arange(self.target_height)[:, None]
         mat_pixels = (
             (arr[:, :, 0] > 190) &
-            (arr[:, :, 1] > 70) & (arr[:, :, 1] < 160) &
-            (arr[:, :, 2] > 50) & (arr[:, :, 2] < 130)
+            (arr[:, :, 1] > 110) & (arr[:, :, 1] < 165) &
+            (arr[:, :, 2] > 70) & (arr[:, :, 2] < 125) &
+            (y_coords >= 112) & (y_coords < 230)
         )
-        my, mx = np.where(mat_pixels & (np.arange(self.target_height)[:, None] < 120))
-        stairs_col, stairs_row = 12, 2
-        if len(my) > 60:
-            stairs_col = max(0, min(GRID_COLS - 1, int(np.median(mx)) // TILE_SIZE))
-            stairs_row = max(0, min(GRID_ROWS - 1, int(np.median(my)) // TILE_SIZE))
+        my, mx = np.where(mat_pixels)
+        mat_col, mat_row = 10, 4
+        if len(my) > 30:
+            mat_col, mat_row = pixel_to_tile(int(np.median(mx)), int(np.median(my)))
 
-        # Add Stairs POI
+        # Room offset relative to nominal view (where mat is at Col 10, Row 4)
+        dx = mat_col - 10
+        dy = mat_row - 4
+
+        # Stairs Warp: The actual staircase steps are 1 tile WEST (LEFT) of the mat!
+        stairs_col = max(0, mat_col - 1)
+        stairs_row = mat_row
+        stairs_px, stairs_py = tile_to_pixel_center(stairs_col, stairs_row)
+
+        # 2. Add Stairs POI (Actual warp destination: step WEST/LEFT from the mat into the stairs)
         pois.append(POI(
             name="STAIRS_DOWN",
             category="WARP",
             tile_col=stairs_col,
             tile_row=stairs_row,
-            pixel_x=stairs_col * TILE_SIZE + 16,
-            pixel_y=stairs_row * TILE_SIZE + 16,
-            description="Staircase descending to 1F Living Room",
+            pixel_x=stairs_px,
+            pixel_y=stairs_py,
+            description="Staircase descending to 1F Living Room (Head WEST/LEFT from orange mat into stairs)",
             interaction_tile=(stairs_col, stairs_row)
         ))
 
-        # 2. Add PC POI in top-left
+        # 2b. Add Landing Mat POI (Staging tile in front of the staircase)
+        mat_px, mat_py = tile_to_pixel_center(mat_col, mat_row)
+        pois.append(POI(
+            name="STAIRS_MAT",
+            category="OBJECT",
+            tile_col=mat_col,
+            tile_row=mat_row,
+            pixel_x=mat_px,
+            pixel_y=mat_py,
+            description="Orange stairs landing mat (Approach here first, then head WEST into stairs)",
+            interaction_tile=(mat_col, mat_row)
+        ))
+
+        # 3. Add Wall Sign POI (Town map / title sign on North Wall - NOT the stairs!)
+        sign_col = max(0, min(GRID_COLS - 1, 11 + dx))
+        sign_row = max(0, min(GRID_ROWS - 1, 2 + dy))
+        sign_px, sign_py = tile_to_pixel_center(sign_col, sign_row)
+        pois.append(POI(
+            name="WALL_SIGN",
+            category="OBJECT",
+            tile_col=sign_col,
+            tile_row=sign_row,
+            pixel_x=sign_px,
+            pixel_y=sign_py,
+            description="Town Map / Notice Sign on North Wall (Wall fixture, not an exit)",
+            interaction_tile=(sign_col, min(GRID_ROWS - 1, sign_row + 1))
+        ))
+
+        # 4. Add PC POI in top-left
+        pc_col = max(0, min(GRID_COLS - 1, 1 + dx))
+        pc_row = max(0, min(GRID_ROWS - 1, 2 + dy))
+        pc_px, pc_py = tile_to_pixel_center(pc_col, pc_row)
         pois.append(POI(
             name="PC",
             category="OBJECT",
-            tile_col=3,
-            tile_row=1,
-            pixel_x=3 * TILE_SIZE + 16,
-            pixel_y=1 * TILE_SIZE + 16,
+            tile_col=pc_col,
+            tile_row=pc_row,
+            pixel_x=pc_px,
+            pixel_y=pc_py,
             description="Red's Personal Computer (Item Storage)",
-            interaction_tile=(3, 2)
+            interaction_tile=(pc_col, min(GRID_ROWS - 1, pc_row + 1))
         ))
 
-        # 3. Mark static bedroom obstacles:
-        # Solid North Wall along Row 0
-        for c in range(GRID_COLS):
-            grid[0, c] = CELL_WALL
+        # 4. Room Void Borders (Cols outside room are black void)
+        col_left = max(0, 1 + dx)
+        col_right = min(GRID_COLS - 1, 11 + dx)
+        grid[0, :] = CELL_VOID
+        if col_left > 0:
+            grid[:, :col_left] = CELL_VOID
+        if col_right + 1 < GRID_COLS:
+            grid[:, col_right + 1:] = CELL_VOID
 
-        # PC at (Col 3, Row 1)
-        grid[1, 3] = CELL_OBSTACLE
+        # 5. North Wall & Upper Fixtures (Rows 1, 2, 3)
+        for r in range(max(0, 1 + dy), min(GRID_ROWS, 4 + dy)):
+            for c in range(col_left, col_right + 1):
+                if grid[r, c] != CELL_VOID:
+                    grid[r, c] = CELL_WALL
 
-        # Dressers and bookcases along North Wall at Cols 5-7, Row 1
-        for c in [5, 6, 7]:
-            grid[1, c] = CELL_OBSTACLE
+        # 6. Staircase Safety Railing & Steps
+        # Vertical railing post along western side of stairs: Col (stairs_col - 1 = mat_col - 2)
+        rail_col = stairs_col - 1
+        for r in [stairs_row, stairs_row + 1]:
+            if 0 <= rail_col < GRID_COLS and 0 <= r < GRID_ROWS:
+                grid[r, rail_col] = CELL_RAILING
 
-        # Bed fixture at Cols 3-4, Rows 4-6
-        for r in [4, 5, 6]:
-            for c in [3, 4]:
-                grid[r, c] = CELL_OBSTACLE
+        # Bottom horizontal railing bar: Below the stairs steps: Col stairs_col (mat_col - 1), Row stairs_row + 1
+        bar_col = stairs_col
+        if 0 <= bar_col < GRID_COLS and 0 <= stairs_row + 1 < GRID_ROWS:
+            grid[stairs_row + 1, bar_col] = CELL_RAILING
 
-        # TV and stand at Col 8, Rows 3-4
-        for r in [3, 4]:
-            grid[r, 8] = CELL_OBSTACLE
+        # Wooden staircase steps / upper wall behind stairs
+        if 0 <= bar_col < GRID_COLS and 0 <= stairs_row - 1 < GRID_ROWS:
+            grid[stairs_row - 1, bar_col] = CELL_WALL
+        if 0 <= mat_col < GRID_COLS and 0 <= stairs_row - 1 < GRID_ROWS:
+            grid[stairs_row - 1, mat_col] = CELL_WALL
 
-        # 4. Staircase Safety Railing (Cols 10-11, Rows 1-3)
-        # Dynamic check for bright white railing pixels (> 40 pixels > 235 RGB)
-        for r in range(1, 4):
-            for c in range(9, 13):
-                cell_patch = arr[r * TILE_SIZE:(r + 1) * TILE_SIZE, c * TILE_SIZE:(c + 1) * TILE_SIZE]
-                white_cnt = np.sum((cell_patch[:, :, 0] > 235) & (cell_patch[:, :, 1] > 235) & (cell_patch[:, :, 2] > 235))
-                if white_cnt > 40 and not (c == stairs_col and r == stairs_row):
-                    grid[r, c] = CELL_RAILING
+        # Dynamic check for bright white railing pixels near the staircase
+        for r in range(max(0, stairs_row - 1), min(GRID_ROWS, stairs_row + 2)):
+            for c in range(max(0, stairs_col - 2), min(GRID_COLS, mat_col + 1)):
+                if (c, r) in [(mat_col, mat_row), (stairs_col, stairs_row)]:
+                    continue
+                x1, y1, x2, y2 = tile_bounds(c, r)
+                cell_patch = arr[max(0, y1):min(self.target_height, y2), max(0, x1):min(self.target_width, x2)]
+                if cell_patch.size > 0:
+                    white_cnt = np.sum((cell_patch[:, :, 0] > 210) & (cell_patch[:, :, 1] > 210) & (cell_patch[:, :, 2] > 210))
+                    if white_cnt > 35:
+                        grid[r, c] = CELL_RAILING
 
-        # Guaranteed structural railing coverage:
-        # Col 10: Vertical safety post (Rows 1, 2, 3)
-        for r in [1, 2, 3]:
-            grid[r, 10] = CELL_RAILING
-        # Col 11: Bottom horizontal railing (Rows 2, 3)
-        for r in [2, 3]:
-            grid[r, 11] = CELL_RAILING
+        # 7. Bed and TV Furniture Obstacles
+        # Bed: southwest corner (Cols 2-3, Rows 5-8 in nominal room)
+        for r in range(max(0, 5 + dy), min(GRID_ROWS, 9 + dy)):
+            for c in range(max(0, 2 + dx), min(GRID_COLS, 4 + dx)):
+                if grid[r, c] == CELL_WALKABLE:
+                    grid[r, c] = CELL_OBSTACLE
 
-        # Mark orange stairs landing tile as CELL_WARP
+        # TV Console / Stand: south-central (Cols 6-7, Rows 5-6 in nominal room)
+        for r in range(max(0, 5 + dy), min(GRID_ROWS, 7 + dy)):
+            for c in range(max(0, 6 + dx), min(GRID_COLS, 8 + dx)):
+                if grid[r, c] == CELL_WALKABLE:
+                    grid[r, c] = CELL_OBSTACLE
+
+        # 8. Mark cells: Landing mat is WALKABLE, stairs steps is CELL_WARP
+        grid[mat_row, mat_col] = CELL_WALKABLE
         grid[stairs_row, stairs_col] = CELL_WARP
 
         notes.extend([
             "Red is upstairs in his 2F Bedroom.",
-            f"PRIMARY EXIT: Staircase to 1F is located at Col {stairs_col}, Row {stairs_row} (Top-Right).",
-            "OBSTACLES: Bed is at Cols 3-4 Rows 4-6. TV is at Col 8 Rows 3-4. White staircase railing is at Cols 10-11 Rows 1-3.",
-            "NAVIGATION RULE: Walk south/east of the TV across the open floor at Row 4 to Col 12, then walk UP into the orange stairs landing mat at Col 12, Row 2!",
-            "VOID WALLS: West and South borders are impassable black void. DO NOT move into void!"
+            f"PRIMARY EXIT: Staircase to 1F is located at Col {stairs_col}, Row {stairs_row}.",
+            f"LANDING MAT: Orange mat is at Col {mat_col}, Row {mat_row}.",
+            f"RAILING: Safety railing is below the stairs at Col {bar_col}, Row {stairs_row + 1} and vertical post at Col {rail_col}.",
+            f"NAVIGATION RULE: First step onto the orange landing mat at Col {mat_col}, Row {mat_row}, then head WEST (LEFT) into the staircase at Col {stairs_col}, Row {stairs_row}!",
+            "SAFETY WARNING: Do NOT move DOWN from Row 4 — the bottom railing is located at Row 5!",
+            "VOID WALLS: North wall and void borders are impassable."
         ])
 
         available_intents.extend(["EXIT_ROOM", "GO_TO_POI", "WAIT"])
@@ -450,15 +588,21 @@ class ScreenAnalyzer:
         available_intents: List[str]
     ):
         """Analyzes 1F Living Room: front door exit, dining table with Mom, stairs up."""
-        # Front door exit mat at bottom center
+        # Front door exit mat at bottom center (dynamic red mat detection)
+        red_mat = (arr[180:, :, 0] > 180) & (arr[180:, :, 1] < 100) & (arr[180:, :, 2] < 100)
+        my, mx = np.where(red_mat)
         exit_col, exit_row = 4, 7
+        if len(my) > 30:
+            exit_col, exit_row = pixel_to_tile(int(np.median(mx)), int(np.median(my)) + 180)
+
+        exit_px, exit_py = tile_to_pixel_center(exit_col, exit_row)
         pois.append(POI(
             name="FRONT_DOOR",
             category="WARP",
             tile_col=exit_col,
             tile_row=exit_row,
-            pixel_x=exit_col * TILE_SIZE + 16,
-            pixel_y=exit_row * TILE_SIZE + 16,
+            pixel_x=exit_px,
+            pixel_y=exit_py,
             description="Front Door exit mat leading outside to Pallet Town",
             interaction_tile=(exit_col, exit_row)
         ))
@@ -687,13 +831,10 @@ class ScreenAnalyzer:
             for r in range(GRID_ROWS):
                 for c in range(GRID_COLS):
                     cell = analysis.collision_grid[r, c]
-                    x1 = c * TILE_SIZE
-                    y1 = r * TILE_SIZE
-                    x2 = (c + 1) * TILE_SIZE
-                    y2 = (r + 1) * TILE_SIZE
+                    x1, y1, x2, y2 = tile_bounds(c, r)
                     if cell == CELL_VOID:
                         draw.rectangle([x1, y1, x2, y2], fill=(20, 20, 20, 160), outline=(80, 20, 20))
-                    elif cell in (CELL_OBSTACLE, CELL_RAILING, CELL_COUNTER):
+                    elif cell in (CELL_OBSTACLE, CELL_RAILING, CELL_COUNTER, CELL_WALL):
                         draw.rectangle([x1, y1, x2, y2], outline=(255, 60, 60), width=1)
 
             # Draw detected player
@@ -711,9 +852,15 @@ class ScreenAnalyzer:
                 draw.rectangle([x - 12, y - 12, x + 12, y + 12], outline=color, width=2)
                 draw.text((max(0, x - 24), max(0, y - 22)), poi.name, fill=color)
 
+            # Draw dialogue bubble box if active
+            if analysis.is_dialogue:
+                draw.rectangle([12, 215, 468, 310], outline=(255, 255, 0), width=2)
+                draw.text((20, 200), "ACTIVE SPEECH BUBBLE (ADVANCE_DIALOGUE)", fill=(255, 255, 0))
+
             # Header info bar
             draw.rectangle([0, 0, self.target_width, 18], fill=(0, 0, 0, 200))
-            draw.text((6, 2), f"Area: {analysis.area_type} | POIs: {len(analysis.pois)}", fill=(255, 255, 255))
+            diag_str = " | [SPEECH BUBBLE ACTIVE]" if analysis.is_dialogue else ""
+            draw.text((6, 2), f"Area: {analysis.area_type} | POIs: {len(analysis.pois)}{diag_str}", fill=(255, 255, 255))
 
             Path(self.debug_poi_path).parent.mkdir(parents=True, exist_ok=True)
             annotated.save(self.debug_poi_path)
@@ -722,9 +869,19 @@ class ScreenAnalyzer:
 
     def format_grounded_prompt(self, analysis: SceneAnalysis) -> str:
         """Formats the analysis into an unambiguous spatial grounding block for the LLM."""
-        lines = [
-            f"[DETECTED ENVIRONMENT]: {analysis.area_description}",
-        ]
+        lines = []
+
+        if analysis.is_dialogue:
+            arrow_info = " [WAITING FOR INPUT: Press 'A' to advance]" if analysis.dialogue_has_arrow else " [Text actively rendering]"
+            lines.append(f"[ACTIVE SPEECH BUBBLE / DIALOGUE ON SCREEN]{arrow_info}:")
+            lines.append("  * An on-screen speech bubble / message window is OPEN at the bottom of the screen!")
+            lines.append("  * Carefully inspect the attached focused speech bubble crop image.")
+            lines.append("  * TRANSCRIBE the visible speech bubble text into your response field `dialogue_text`.")
+            lines.append("  * PRIMARY INTENT: Choose `intent: 'ADVANCE_DIALOGUE'` to advance or dismiss this message.")
+            if "ADVANCE_DIALOGUE" not in analysis.available_intents:
+                analysis.available_intents.insert(0, "ADVANCE_DIALOGUE")
+
+        lines.append(f"[DETECTED ENVIRONMENT]: {analysis.area_description}")
 
         if analysis.player.detected:
             p = analysis.player

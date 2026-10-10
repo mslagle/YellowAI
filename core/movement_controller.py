@@ -22,6 +22,10 @@ from core.screen_analyzer import (
     GRID_COLS,
     GRID_ROWS,
     TILE_SIZE,
+    GRID_Y_OFFSET,
+    tile_bounds,
+    tile_to_pixel_center,
+    pixel_to_tile,
     CELL_WALKABLE,
     CELL_VOID,
     CELL_WALL,
@@ -143,7 +147,7 @@ class MovementController:
                     return poi.interaction_tile[0], poi.interaction_tile[1], poi.name
             # Fallbacks by area
             if scene.area_type == "BEDROOM_2F":
-                return 12, 2, "STAIRS_DOWN"
+                return 9, 4, "STAIRS_DOWN"
             elif scene.area_type == "LIVING_ROOM_1F":
                 return 4, 7, "FRONT_DOOR"
             elif scene.area_type == "OAKS_LAB":
@@ -286,17 +290,14 @@ class MovementController:
             for r in range(GRID_ROWS):
                 for c in range(GRID_COLS):
                     val = scene.collision_grid[r, c]
-                    x1 = c * TILE_SIZE
-                    y1 = r * TILE_SIZE
-                    x2 = (c + 1) * TILE_SIZE
-                    y2 = (r + 1) * TILE_SIZE
+                    x1, y1, x2, y2 = tile_bounds(c, r)
                     if val != CELL_WALKABLE:
-                        draw.rectangle([x1, y1, x2, y2], outline=(180, 40, 40), width=1)
+                        draw.rectangle([x1, y1, x2, y2], outline=(100, 30, 130), width=1)
 
             # 2. Draw planned path line
             if len(path) > 1:
                 pixel_points = [
-                    (col * TILE_SIZE + 16, row * TILE_SIZE + 16)
+                    tile_to_pixel_center(col, row)
                     for col, row in path
                 ]
                 # Draw thick route line
@@ -309,17 +310,15 @@ class MovementController:
 
             # 3. Draw START marker (Green circle)
             sc, sr = start_tile
-            sx = sc * TILE_SIZE + 16
-            sy = sr * TILE_SIZE + 16
+            sx, sy = tile_to_pixel_center(sc, sr)
             draw.ellipse([sx - 12, sy - 12, sx + 12, sy + 12], outline=(0, 255, 0), width=3)
             draw.text((max(0, sx - 20), max(0, sy - 25)), "START", fill=(0, 255, 0))
 
-            # 4. Draw END marker (Gold / Red target box)
+            # 4. Draw END marker (Gold target box)
             gc, gr = goal_tile
-            gx = gc * TILE_SIZE + 16
-            gy = gr * TILE_SIZE + 16
-            draw.rectangle([gx - 12, gy - 12, gx + 12, gy + 12], outline=(255, 50, 50), width=3)
-            draw.text((max(0, gx - 32), max(0, gy - 25)), f"END: {target_name}", fill=(255, 50, 50))
+            gx, gy = tile_to_pixel_center(gc, gr)
+            draw.rectangle([gx - 12, gy - 12, gx + 12, gy + 12], outline=(255, 200, 0), width=3)
+            draw.text((max(0, gx - 32), max(0, gy - 25)), f"END: {target_name}", fill=(255, 200, 0))
 
             # 5. Header banner
             draw.rectangle([0, 0, 480, 22], fill=(10, 10, 30, 220))
@@ -349,13 +348,23 @@ class MovementController:
         4. Saves visual route map to `logs/last_route_planned.png`.
         5. Executes buttons sequentially with reactive interrupts.
         """
+        # Immediate dialogue advance handling (regardless of player detection)
+        if intent == "ADVANCE_DIALOGUE":
+            if self.input_controller:
+                self.input_controller.press_button("A")
+            return {
+                "success": True,
+                "target": "DIALOGUE_ADVANCE",
+                "path_length": 0,
+                "planned_buttons": ["A"],
+                "executed_buttons": ["A"] if self.input_controller else [],
+                "interrupted": False,
+                "interrupt_reason": None,
+                "status": "ADVANCED_DIALOGUE"
+            }
+
         p = scene.player
         if not p.detected:
-            # If player sprite isn't visible (e.g. dialogue, title, menu), fallback to A or B
-            if intent == "ADVANCE_DIALOGUE":
-                if self.input_controller:
-                    self.input_controller.press_button("A")
-                return {"success": True, "buttons": ["A"], "status": "ADVANCED_DIALOGUE"}
             return {"success": False, "buttons": [], "status": "PLAYER_NOT_DETECTED"}
 
         start_tile = (p.tile_col, p.tile_row)

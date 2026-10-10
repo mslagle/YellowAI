@@ -366,12 +366,14 @@ class GameLoop:
                         mode_hint=mode_hint,
                         battle_thinking_budget=BATTLE_THINKING_BUDGET if trigger_battle_thinking else None,
                         battle_advisor_prompt=battle_advisor_prompt,
+                        dialogue_crop=scene.dialogue_crop,
                         emulator_verified=True  # Verified alive and visible right above!
                     )
                     api_duration = time.time() - api_start
 
                     intent = decision.get("intent", "EXIT_ROOM")
                     target_poi = decision.get("target_poi")
+                    dialogue_text = decision.get("dialogue_text")
                     battle_action = decision.get("battle_action")
                     move_slot = decision.get("move_slot")
                     target_item = decision.get("target_item")
@@ -379,6 +381,11 @@ class GameLoop:
                     reasoning = decision.get("reasoning", "")
                     thought = decision.get("thought", None)
                     cadence = decision.get("cadence_tag", "")
+
+                    if dialogue_text and isinstance(dialogue_text, str) and dialogue_text.strip() and dialogue_text.strip().upper() != "NULL":
+                        clean_diag = dialogue_text.strip()
+                        print(f"\n[Speech Bubble Text]: \"{clean_diag}\"")
+                        self.memory_manager.add_knowledge_note(f"Dialogue: {clean_diag}")
 
                     print(f"Strategic Decision: Intent=[{intent}] Target=[{target_poi or 'N/A'}] | Reason: '{reasoning}' (Cadence: {cadence})")
 
@@ -482,6 +489,7 @@ class GameLoop:
                     print(f"[Movement Planned]: Route={move_res.get('target', '')} ({len(planned)} buttons: {' -> '.join(planned)})")
 
                 # Grab fresh frame after actions executed
+                latest_frame = frame
                 fresh_frame, _ = self.screen_capture.capture_frame()
                 if fresh_frame is not None:
                     latest_frame = fresh_frame

@@ -127,6 +127,7 @@ class BionicPlayer:
         mode_hint: str = "",
         battle_thinking_budget: Optional[int] = None,
         battle_advisor_prompt: str = "",
+        dialogue_crop: Optional[Image.Image] = None,
         emulator_verified: bool = False
     ) -> Dict[str, Any]:
         """
@@ -165,9 +166,19 @@ class BionicPlayer:
 
         user_content.extend([
             {"type": "text", "text": "[CURRENT SCREENSHOT (Live game state to act upon)]:"},
-            {"type": "image_url", "image_url": {"url": data_uri}},
-            {"type": "text", "text": prompt_text}
+            {"type": "image_url", "image_url": {"url": data_uri}}
         ])
+
+        if dialogue_crop is not None:
+            crop_buffer = io.BytesIO()
+            dialogue_crop.convert("RGB").save(crop_buffer, format="JPEG", quality=95)
+            crop_b64 = base64.b64encode(crop_buffer.getvalue()).decode("utf-8")
+            user_content.extend([
+                {"type": "text", "text": "[FOCUSED SPEECH BUBBLE / DIALOGUE CROP]:"},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{crop_b64}"}}
+            ])
+
+        user_content.append({"type": "text", "text": prompt_text})
 
         schema_json = schema_cls.model_json_schema()
         system_msg = f"{SYSTEM_INSTRUCTION}\nYou MUST respond STRICTLY in valid JSON matching this schema:\n{json.dumps(schema_json)}"

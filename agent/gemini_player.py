@@ -115,6 +115,10 @@ class StandardTurnResponse(BaseModel):
         default=None,
         description="If in a battle, state opposing Pokémon species on screen (e.g. 'Pidgey', 'Geodude')."
     )
+    dialogue_text: Optional[str] = Field(
+        default=None,
+        description="If a speech bubble or dialogue window is open on screen, transcribe the exact words spoken or displayed."
+    )
     actions: Optional[List[str]] = Field(
         default=None,
         description="Optional legacy fallback field (handled by local movement controller)."
@@ -219,6 +223,7 @@ class GeminiPlayer:
         mode_hint: str = "",
         battle_thinking_budget: Optional[int] = None,
         battle_advisor_prompt: str = "",
+        dialogue_crop: Optional[Image.Image] = None,
         emulator_verified: bool = False
     ) -> Dict[str, Any]:
         """
@@ -262,6 +267,17 @@ class GeminiPlayer:
 
         contents.append("[CURRENT SCREENSHOT (Live game state to act upon)]:")
         contents.append(image_part)
+
+        if dialogue_crop is not None:
+            crop_byte_arr = io.BytesIO()
+            dialogue_crop.convert("RGB").save(crop_byte_arr, format='JPEG', quality=95)
+            crop_part = types.Part.from_bytes(
+                data=crop_byte_arr.getvalue(),
+                mime_type="image/jpeg"
+            )
+            contents.append("[FOCUSED SPEECH BUBBLE / DIALOGUE CROP]:")
+            contents.append(crop_part)
+
         contents.append(prompt_text)
 
         try:
