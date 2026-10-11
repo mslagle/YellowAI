@@ -49,7 +49,7 @@ class MovementController:
         self,
         input_controller: Optional[InputController] = None,
         screen_capture: Optional[ScreenCapture] = None,
-        step_settle_delay: float = 0.18,
+        step_settle_delay: float = 0.25,
         route_debug_path: str = "logs/last_route_planned.png"
     ):
         self.input_controller = input_controller
@@ -108,9 +108,9 @@ class MovementController:
                     continue
 
                 cell_val = collision_grid[nr, nc]
-                # Walkable condition: cell must be WALKABLE or WARP, or the destination goal tile itself
+                # Walkable condition: intermediate tiles must be CELL_WALKABLE; the destination goal_tile itself is always passable
                 is_goal = (nc, nr) == goal_tile
-                is_passable = (cell_val == CELL_WALKABLE or cell_val == CELL_WARP or is_goal)
+                is_passable = (cell_val == CELL_WALKABLE or is_goal)
 
                 if not is_passable:
                     continue
@@ -162,35 +162,70 @@ class MovementController:
             elif scene.area_type == "POKEMART":
                 return 4, 8, "MART_EXIT"
 
-        # 2. GO_TO_POI / TALK_TO_NPC / ENTER_BUILDING: Look up specific POI first
-        if intent in ("GO_TO_POI", "TALK_TO_NPC", "ENTER_BUILDING") and target_poi_name:
+        # 2. Explicit target_poi_name lookup (works across GO_TO_POI, TALK_TO_NPC, ENTER_BUILDING, and EXPLORE_*)
+        if target_poi_name:
             t_upper = target_poi_name.upper().strip()
             if scene.area_type == "LIVING_ROOM_1F" and any(k in t_upper for k in ["DOOR", "EXIT", "OUTSIDE"]):
                 for poi in scene.pois:
                     if poi.name == "FRONT_DOOR":
                         return poi.interaction_tile[0], poi.interaction_tile[1], poi.name
                 return 2, 9, "FRONT_DOOR"
+            if scene.area_type == "OAKS_LAB" and "EXIT" not in t_upper:
+                if any(k in t_upper for k in ["STARTER", "TABLE", "BALL", "LAB", "POKEMON"]):
+                    for poi in scene.pois:
+                        if poi.name == "STARTER_TABLE":
+                            return poi.interaction_tile[0], poi.interaction_tile[1], poi.name
+                elif "OAK" in t_upper:
+                    for poi in scene.pois:
+                        if poi.name == "PROFESSOR_OAK":
+                            return poi.interaction_tile[0], poi.interaction_tile[1], poi.name
             for poi in scene.pois:
                 if t_upper in poi.name.upper() or poi.name.upper() in t_upper:
                     return poi.interaction_tile[0], poi.interaction_tile[1], poi.name
-            if any(k in t_upper for k in ["LAB", "OAK", "DOOR", "BUILDING"]):
+            if scene.area_type == "OVERWORLD" and any(k in t_upper for k in ["LAB", "OAK"]):
+                for poi in scene.pois:
+                    if poi.name == "OAKS_LAB":
+                        return poi.interaction_tile[0], poi.interaction_tile[1], poi.name
+                return self._find_furthest_walkable_tile("SOUTHEAST", (p.tile_col, p.tile_row), scene.collision_grid)
+            if scene.area_type == "OVERWORLD" and any(k in t_upper for k in ["MOM", "RED", "HOME"]):
+                house_doors = [poi for poi in scene.pois if poi.name == "BUILDING_DOOR"]
+                if house_doors:
+                    west_door = min(house_doors, key=lambda d: d.tile_col)
+                    return west_door.interaction_tile[0], west_door.interaction_tile[1], west_door.name
+            if scene.area_type == "OVERWORLD" and any(k in t_upper for k in ["DAISY", "RIVAL", "SISTER", "MAP"]):
+                house_doors = [poi for poi in scene.pois if poi.name == "BUILDING_DOOR"]
+                if house_doors:
+                    east_door = max(house_doors, key=lambda d: d.tile_col)
+                    return east_door.interaction_tile[0], east_door.interaction_tile[1], east_door.name
+            if scene.area_type == "OVERWORLD" and any(k in t_upper for k in ["DOOR", "BUILDING", "CENTER", "MART", "HOUSE"]):
                 for poi in scene.pois:
                     if poi.category == "WARP":
                         return poi.interaction_tile[0], poi.interaction_tile[1], poi.name
 
-            # If TALK_TO_NPC and no specific name matched, pick nearest NPC
-            if intent == "TALK_TO_NPC":
-                for poi in scene.pois:
-                    if poi.category == "NPC":
-                        return poi.interaction_tile[0], poi.interaction_tile[1], poi.name
+        if intent == "TALK_TO_NPC":
+            for poi in scene.pois:
+                if poi.category == "NPC":
+                    return poi.interaction_tile[0], poi.interaction_tile[1], poi.name
 
-        # 3. Directional exploration (EXPLORE_NORTH, SOUTH, EAST, WEST)
+        # 3. Directional exploration (EXPLORE_NORTH, SOUTH, EAST, WEST, SOUTHEAST, etc.)
         if intent.startswith("EXPLORE_"):
             direction = intent.split("_")[-1]
+            # If Professor Oak's Lab is actively detected on screen in Pallet Town (before Pikachu is following Red)
+            # and the LLM orders EXPLORE_SOUTH / EXPLORE_SOUTHEAST / EXPLORE_EAST, snap directly to OAKS_LAB so Red never walks past it!
+            has_pikachu_following = any("PIKACHU_FOLLOWING" in n for n in scene.spatial_notes)
+            if scene.area_type == "OVERWORLD" and direction in ("SOUTH", "SOUTHEAST", "EAST") and not has_pikachu_following:
+                for poi in scene.pois:
+                    if poi.name == "OAKS_LAB":
+                        return poi.interaction_tile[0], poi.interaction_tile[1], poi.name
             return self._find_furthest_walkable_tile(direction, (p.tile_col, p.tile_row), scene.collision_grid)
 
-        # 4. ENTER_BUILDING / GO_TO_POI fallback: Look for building entrance / warp door
+        # 4. ENTER_BUILDING / GO_TO_POI fallback:
+        # Inside OAKS_LAB / POKECENTER / POKEMART, never default a generic GO_TO_POI / ENTER_BUILDING to the room's exit door!
         if intent in ("ENTER_BUILDING", "GO_TO_POI"):
+            if scene.area_type in ("OAKS_LAB", "POKECENTER", "POKEMART"):
+                for poi in scene.pois:
+                    if poi.category in ("OBJECT", "NPC") and "EXIT" not in poi.name:
+                        return poi.interaction_tile[0], poi.interaction_tile[1], poi.name
             for poi in scene.pois:
                 if poi.category == "WARP":
                     return poi.interaction_tile[0], poi.interaction_tile[1], poi.name
@@ -315,6 +350,46 @@ class MovementController:
 
         if best_candidate is not None:
             return best_candidate[0], best_candidate[1], f"EXPLORE_{dir_upper}"
+
+        if (target_c, target_r) != start_tile:
+            return target_c, target_r, f"EXPLORE_{dir_upper}"
+
+        # Dead-end corner fallback: If the requested direction is 100% blocked (zero reachable progress),
+        # try component or opposite open directions so Red routes out of the corner instead of standing still!
+        fallback_order = {
+            "SOUTHEAST": ["SOUTH", "EAST", "NORTH", "WEST", "NORTHWEST"],
+            "SOUTHWEST": ["SOUTH", "WEST", "NORTH", "EAST", "NORTHEAST"],
+            "NORTHEAST": ["NORTH", "EAST", "WEST", "SOUTH", "SOUTHWEST"],
+            "NORTHWEST": ["NORTH", "WEST", "EAST", "SOUTH", "SOUTHEAST"],
+            "SOUTH": ["SOUTHEAST", "SOUTHWEST", "EAST", "WEST", "NORTH"],
+            "EAST": ["NORTHEAST", "SOUTHEAST", "NORTH", "SOUTH", "WEST"],
+            "NORTH": ["NORTHEAST", "NORTHWEST", "EAST", "WEST", "SOUTH"],
+            "WEST": ["NORTHWEST", "SOUTHWEST", "NORTH", "SOUTH", "EAST"],
+        }.get(dir_upper, ["NORTH", "WEST", "SOUTH", "EAST"])
+
+        for alt_dir in fallback_order:
+            best_alt = None
+            best_alt_adv = 0
+            for r in range(GRID_ROWS):
+                for c in range(GRID_COLS):
+                    if (c, r) == start_tile or grid[r, c] != CELL_WALKABLE:
+                        continue
+                    adv = 0
+                    if alt_dir == "NORTH" and r <= sr - 2:
+                        adv = (sr - r) * 10 - abs(c - sc)
+                    elif alt_dir == "WEST" and c <= sc - 2:
+                        adv = (sc - c) * 10 - abs(r - sr)
+                    elif alt_dir == "SOUTH" and r >= sr + 2:
+                        adv = (r - sr) * 10 - abs(c - sc)
+                    elif alt_dir == "EAST" and c >= sc + 2:
+                        adv = (c - sc) * 10 - abs(r - sr)
+                    if adv > best_alt_adv:
+                        p = self.find_path(grid, start_tile, (c, r))
+                        if p and 2 <= len(p) <= 9:
+                            best_alt_adv = adv
+                            best_alt = (c, r)
+            if best_alt is not None:
+                return best_alt[0], best_alt[1], f"EXPLORE_{alt_dir}"
 
         return target_c, target_r, f"EXPLORE_{dir_upper}"
 
@@ -451,8 +526,39 @@ class MovementController:
         4. Saves visual route map to `logs/last_route_planned.png`.
         5. Executes buttons sequentially with reactive interrupts.
         """
-        # Immediate dialogue advance handling (regardless of player detection)
-        if intent == "ADVANCE_DIALOGUE":
+        # Immediate UI screen / dialogue advance handling (regardless of player detection)
+        if scene.area_type == "NAMING_SCREEN":
+            naming_btns = ["B", "START", "A"]
+            if self.input_controller:
+                for b in naming_btns:
+                    self.input_controller.press_button(b)
+                    time.sleep(0.25)
+            return {
+                "success": True,
+                "target": "CONFIRM_NAMING_SCREEN",
+                "path_length": 0,
+                "planned_buttons": naming_btns,
+                "executed_buttons": naming_btns if self.input_controller else [],
+                "interrupted": False,
+                "interrupt_reason": None,
+                "status": "CONFIRMED_DEFAULT_NAME"
+            }
+
+        if scene.area_type == "TRAINER_CARD":
+            if self.input_controller:
+                self.input_controller.press_button("B")
+            return {
+                "success": True,
+                "target": "CLOSE_TRAINER_CARD",
+                "path_length": 0,
+                "planned_buttons": ["B"],
+                "executed_buttons": ["B"] if self.input_controller else [],
+                "interrupted": False,
+                "interrupt_reason": None,
+                "status": "CLOSED_TRAINER_CARD"
+            }
+
+        if intent == "ADVANCE_DIALOGUE" or scene.area_type == "TITLE_SCREEN":
             if self.input_controller:
                 self.input_controller.press_button("A")
             return {
@@ -493,6 +599,57 @@ class MovementController:
         # Convert waypoints to button sequence
         buttons = self.convert_path_to_buttons(path, initial_facing=p.facing)
 
+        # If targeting an NPC or interactive OBJECT (e.g., STARTER_TABLE, PROFESSOR_OAK, MOM, MART_CLERK, PC),
+        # ensure Red turns toward the POI tile at the end of the path and presses 'A' to interact!
+        matched_poi = next((poi for poi in scene.pois if poi.name == target_name), None)
+        if (
+            matched_poi is not None
+            and matched_poi.category in ("NPC", "OBJECT")
+            and matched_poi.name != "EXITED_HOUSE_DOOR"
+            and (matched_poi.tile_col, matched_poi.tile_row) != matched_poi.interaction_tile
+            and path
+        ):
+            end_c, end_r = path[-1]
+            pc, pr = matched_poi.tile_col, matched_poi.tile_row
+            req_facing = None
+            if pc < end_c:
+                req_facing = "LEFT"
+            elif pc > end_c:
+                req_facing = "RIGHT"
+            elif pr < end_r:
+                req_facing = "UP"
+            elif pr > end_r:
+                req_facing = "DOWN"
+
+            final_facing = buttons[-1] if buttons else p.facing
+            if req_facing and final_facing != req_facing:
+                buttons.append(req_facing)
+            buttons.append("A")
+        elif (
+            matched_poi is not None
+            and matched_poi.category == "WARP"
+            and scene.area_type == "OVERWORLD"
+            and matched_poi.tile_row == 0
+            and path
+        ):
+            # Top-edge Overworld doorway (e.g., Oak's Lab door in y=0..16 directly North of Row 0):
+            # After reaching (col, 0), turn UP and step UP into the doorway!
+            final_facing = buttons[-1] if buttons else p.facing
+            if final_facing != "UP":
+                buttons.append("UP")
+            buttons.append("UP")
+        elif (
+            matched_poi is not None
+            and matched_poi.name in ("FRONT_DOOR", "MART_EXIT", "CENTER_EXIT")
+            and start_tile != (matched_poi.tile_col, matched_poi.tile_row)
+            and path
+        ):
+            # Indoor south welcome mat: after walking onto the mat, step DOWN once more to trigger the exit warp!
+            final_facing = buttons[-1] if buttons else p.facing
+            if final_facing != "DOWN":
+                buttons.append("DOWN")
+            buttons.append("DOWN")
+
         # Save route debug visualization
         self.save_route_visualization(
             frame=frame,
@@ -508,6 +665,11 @@ class MovementController:
         executed_buttons: List[str] = []
         interrupted: bool = False
         interrupt_reason: Optional[str] = None
+        is_warp_target = (
+            (matched_poi is not None and matched_poi.category == "WARP")
+            or intent in ("ENTER_BUILDING", "EXIT_ROOM")
+            or (0 <= goal_r < GRID_ROWS and 0 <= goal_c < GRID_COLS and scene.collision_grid[goal_r, goal_c] == CELL_WARP)
+        )
 
         if self.input_controller and buttons:
             prev_thumb = None
@@ -532,6 +694,15 @@ class MovementController:
                             interrupt_reason = "SCENE_WARP_OR_BATTLE"
                             break
                     prev_thumb = curr_thumb
+
+            # If we stepped into a doorway/warp or triggered a scene warp, wait for the GBA door-sliding
+            # animation + fade-to-black + interior room load (~1.2s) before capturing the next turn's frame!
+            if (interrupted and interrupt_reason == "SCENE_WARP_OR_BATTLE") or is_warp_target:
+                time.sleep(1.2)
+                if self.screen_capture:
+                    _, post_warp_thumb = self.screen_capture.capture_frame()
+                    if post_warp_thumb is not None and float(post_warp_thumb.mean()) < 25.0:
+                        time.sleep(0.6)
 
         return {
             "success": True,

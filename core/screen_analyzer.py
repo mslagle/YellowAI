@@ -10,6 +10,7 @@ Uses fast NumPy vector operations (< 5ms) to:
 """
 
 from typing import Dict, Any, List, Optional, Tuple
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 import numpy as np
@@ -215,7 +216,7 @@ class ScreenAnalyzer:
             elif area_type == "LIVING_ROOM_1F":
                 self._analyze_living_room(arr, collision_grid, player, pois, notes, available_intents, is_dialogue=is_dialogue)
             elif area_type == "OAKS_LAB":
-                self._analyze_oaks_lab(arr, collision_grid, player, pois, notes, available_intents)
+                self._analyze_oaks_lab(arr, collision_grid, player, pois, notes, available_intents, is_dialogue=is_dialogue, is_start_menu=is_start_menu)
             elif area_type == "POKECENTER":
                 self._analyze_pokecenter(arr, collision_grid, player, pois, notes, available_intents)
             elif area_type == "POKEMART":
@@ -277,7 +278,7 @@ class ScreenAnalyzer:
             return False
 
     def _is_battle_screen(self, arr: np.ndarray) -> bool:
-        """Detects Pokémon Battle via Enemy & Player cream HUD cards or battle banner + HP bar."""
+        """Detects Pokémon Battle via Enemy/Player cream HUD cards or orange/dark battle banner."""
         try:
             r = arr[:, :, 0].astype(int)
             g = arr[:, :, 1].astype(int)
@@ -289,12 +290,22 @@ class ScreenAnalyzer:
             if ehud_cream > 0.25 and phud_cream > 0.25:
                 return True
 
-            # Fallback for dark battle banner + green HP bar
+            # Orange/ochre battle narrative banner at bottom (y=235..310, RGB ~ [189, 115, 33])
+            orange_banner = float(np.mean(
+                (r[235:310, 20:460] > 165) & (r[235:310, 20:460] < 215) &
+                (g[235:310, 20:460] > 95) & (g[235:310, 20:460] < 140) &
+                (b[235:310, 20:460] > 20) & (b[235:310, 20:460] < 55)
+            ))
+            mint_sky = float(np.mean((r[:100, :] > 200) & (g[:100, :] > 220) & (b[:100, :] > 205)))
+            if orange_banner > 0.45 and (ehud_cream > 0.20 or phud_cream > 0.20 or mint_sky > 0.45):
+                return True
+
+            # Fallback for dark battle banner + green HP bar or HUD card
             bottom_box = arr[220:, :, :]
             is_dark_banner = np.mean(bottom_box[:, :, 0] < 60) > 0.6 and np.mean(bottom_box[:, :, 2] > 60) > 0.3
             hp_green = (g > 200) & (r < 150) & (b < 150)
             has_hp = np.sum(hp_green) > 50
-            return bool(is_dark_banner and has_hp)
+            return bool(is_dark_banner and (has_hp or ehud_cream > 0.20))
         except Exception:
             return False
 
@@ -371,14 +382,17 @@ class ScreenAnalyzer:
             return False
 
     def _is_dialogue_active(self, arr: np.ndarray) -> bool:
-        """Checks if a white bottom dialogue box with dark text is on screen."""
+        """Checks if a white bottom dialogue box with dark, blue, or red text is on screen."""
         try:
-            dialogue_area = arr[230:300, 20:460, :]
-            # Dialogue box interior is mostly pure white (> 220)
-            white_pixels = np.mean((dialogue_area[:, :, 0] > 220) & (dialogue_area[:, :, 1] > 220) & (dialogue_area[:, :, 2] > 220))
-            # Border is dark/grey (< 145)
-            border_dark = np.mean(arr[216:228, 20:460, :] < 145) > 0.30
-            return bool(white_pixels > 0.40 and border_dark)
+            box = arr[238:300, 35:445, :]
+            r = box[:, :, 0]
+            g = box[:, :, 1]
+            b = box[:, :, 2]
+            pure_white = (r >= 245) & (g >= 245) & (b >= 245)
+            pw_left = float(np.mean(pure_white[:, :200]))
+            pw_right = float(np.mean(pure_white[:, 200:]))
+            text_px = float(np.mean((r < 140) | (g < 140) | (b < 140)))
+            return bool(pw_left > 0.60 and pw_right > 0.60 and text_px >= 0.008)
         except Exception:
             return False
 
@@ -432,11 +446,20 @@ class ScreenAnalyzer:
         mg = mid_floor[:, :, 1].astype(int)
         mb = mid_floor[:, :, 2].astype(int)
 
-        tatami = float(np.mean((mr > 140) & (mg > 120) & (mb < 110) & (mr > mb + 35)))
-        green_rug = float(np.mean((mr < 140) & (mg > 140) & (mb < 150) & (mg > mr + 15)))
+        non_void_mid = (mr >= 25) | (mg >= 25) | (mb >= 25)
+        tatami = float(np.mean(
+            ((mr > 140) & (mg > 120) & (mb < 110) & (mr > mb + 35)) |
+            ((mr > 80) & (mg > 70) & (mb < 65) & (mr > mb + 45) & (mg > mb + 40))
+        ))
+        green_rug = float(np.mean(
+            ((mr < 140) & (mg > 140) & (mb < 150) & (mg > mr + 15)) |
+            ((mr >= 45) & (mr <= 90) & (mg >= 100) & (mg <= 150) & (mb >= 45) & (mb <= 95) & (mg > mr + 30) & (mg > mb + 30))
+        ))
         tatami_score = tatami + green_rug
         mart_blue = float(np.mean((mb > mr + 30) & (mb > mg + 10) & (mb > 140)))
-        lab_white = float(np.mean((mr > 180) & (mg > 180) & (mb > 180) & (np.abs(mr - mg) < 20) & (np.abs(mg - mb) < 25)))
+        lab_white_mask = (mr > 180) & (mg > 180) & (mb > 180) & (np.abs(mr - mg) < 20) & (np.abs(mg - mb) < 25)
+        lab_white = float(np.mean(lab_white_mask))
+        lab_white_nv = float(np.sum(lab_white_mask) / max(1, np.sum(non_void_mid)))
         lab_dimmed = float(np.mean((mr > 55) & (mr < 90) & (np.abs(mr - mg) < 8) & (np.abs(mg - mb) < 8)))
 
         # 2. Poké Mart: Distinctive blue indoor floor tiles
@@ -444,7 +467,9 @@ class ScreenAnalyzer:
             return "POKEMART", "Poké Mart - Item Shop"
 
         # 3. Oak's Research Lab: Bright white/grey diagonally-tiled floor + room void borders
-        if (lab_white > 0.30 or (lab_dimmed > 0.30 and is_start_menu)) and tatami < 0.08 and total_void > 0.08:
+        # Using lab_white_nv (fraction of non-void indoor pixels) ensures the South entrance of Oak's Lab
+        # (where 45% of mid_floor is black void + bookshelves) is always recognized as OAKS_LAB!
+        if (lab_white > 0.22 or lab_white_nv > 0.24 or (lab_dimmed > 0.20 and is_start_menu)) and tatami < 0.08 and total_void > 0.08:
             return "OAKS_LAB", "Pallet Town - Professor Oak's Research Lab"
 
         # 4. Poké Center: White/Pink floor, central healing counter with red Poké Ball emblem
@@ -453,10 +478,13 @@ class ScreenAnalyzer:
         if np.mean(center_floor) > 0.25 and np.sum(red_counter_emblem) > 150 and tatami < 0.08 and lab_white < 0.35:
             return "POKECENTER", "Pokémon Center - Free Healing Station"
 
-        # 5. House Indoor Rooms (Tatami wooden floor + green rug): Distinguish 1F Living Room vs 2F Bedroom
+        # 5. House Indoor Rooms (Tatami wooden floor + green rug, Daytime + Nighttime): Distinguish 1F Living Room vs 2F Bedroom
         if tatami >= 0.12 or (tatami_score >= 0.18 and total_void >= 0.15):
-            # Find the green floor rug (5th to 95th percentile bounding box)
-            rug_mask = (r_all >= 80) & (r_all <= 130) & (g_all >= 175) & (g_all <= 220) & (b_all >= 100) & (b_all <= 145)
+            # Find the green floor rug (5th to 95th percentile bounding box, Daytime + Nighttime)
+            rug_mask = (
+                ((r_all >= 80) & (r_all <= 130) & (g_all >= 175) & (g_all <= 220) & (b_all >= 100) & (b_all <= 145)) |
+                ((r_all >= 45) & (r_all <= 90) & (g_all >= 100) & (g_all <= 150) & (b_all >= 45) & (b_all <= 95) & (g_all > r_all + 30) & (g_all > b_all + 30))
+            )
             ry, rx = np.where(rug_mask)
             rug_blue_cnt = 0
             rug_bot_y = 220
@@ -470,7 +498,10 @@ class ScreenAnalyzer:
                 rb = rug_patch[:, :, 2].astype(int)
                 # In 1F Living Room, the blue-and-white checkered dining table + 4 blue chairs sit inside the green rug (>1500 px)
                 # In 2F Bedroom, only the TV's 2 tiny blue screens sit inside the green rug (<=160 px)
-                rug_blue_cnt = int(np.sum((rb > rr + 35) & (rb > 175) & (rg > 130)))
+                rug_blue_cnt = int(np.sum(
+                    ((rb > rr + 35) & (rb > 175) & (rg > 130)) |
+                    ((rb > rr + 30) & (rb > 125) & (rg > 105))
+                ))
 
             if rug_blue_cnt >= 500:
                 return "LIVING_ROOM_1F", "Pallet Town - Mom's Living Room (1F)"
@@ -491,6 +522,13 @@ class ScreenAnalyzer:
                 return "POKEMART", "Poké Mart - Item Shop"
             if "gym" in hint_lower:
                 return "GYM", "Pokémon Gym - Badge Challenge"
+            if total_void > 0.15:
+                if mart_blue > 0.12:
+                    return "POKEMART", "Poké Mart - Item Shop"
+                if lab_white_nv > 0.15:
+                    return "OAKS_LAB", "Pallet Town - Professor Oak's Research Lab"
+                if tatami_score > 0.08:
+                    return "LIVING_ROOM_1F", "Pallet Town - Mom's Living Room (1F)"
 
         return "OVERWORLD", "Pallet Town / Kanto Overworld"
 
@@ -525,22 +563,25 @@ class ScreenAnalyzer:
             if len(valid_cap_x) >= 12:
                 break
 
-        # 2. Nighttime / Dusk Overworld shader cap mask (dark crimson cap with pure black sprite outline below)
+        # 2. Nighttime / Dusk shader cap mask (search tight head window [128:154, 224:256] first so nighttime red doormat below y=155 never pulls cap center down)
         if len(valid_cap_x) < 12:
             night_cap = (
                 (r_all >= 75) & (r_all <= 165) &
                 (g_all <= 65) & (b_all <= 70) &
                 (r_all >= g_all + 30) & (r_all >= b_all + 20)
             )
-            ncy, ncx = np.where(night_cap[115:180, 210:270])
-            ncy += 115
-            ncx += 210
-            for y_val, x_val in zip(ncy, ncx):
-                patch = arr[min(h - 1, y_val + 4):min(h, y_val + 26), max(0, x_val - 10):min(w, x_val + 10)]
-                black_outline = (patch[:, :, 0] < 15) & (patch[:, :, 1] < 15) & (patch[:, :, 2] < 15)
-                if np.sum(black_outline) >= 10:
-                    valid_cap_x.append(int(x_val))
-                    valid_cap_y.append(int(y_val))
+            for y_min, y_max, x_min, x_max in [(128, 154, 224, 256), (115, 180, 210, 270)]:
+                ncy, ncx = np.where(night_cap[y_min:y_max, x_min:x_max])
+                ncy += y_min
+                ncx += x_min
+                for y_val, x_val in zip(ncy, ncx):
+                    patch = arr[min(h - 1, y_val + 4):min(h, y_val + 26), max(0, x_val - 10):min(w, x_val + 10)]
+                    black_outline = (patch[:, :, 0] < 15) & (patch[:, :, 1] < 15) & (patch[:, :, 2] < 15)
+                    if np.sum(black_outline) >= 10:
+                        valid_cap_x.append(int(x_val))
+                        valid_cap_y.append(int(y_val))
+                if len(valid_cap_x) >= 12:
+                    break
 
         if len(valid_cap_x) >= 12:
             py = int(np.median(valid_cap_y))
@@ -558,29 +599,29 @@ class ScreenAnalyzer:
         feet_py = py + 22
         col, row = pixel_to_tile(px, feet_py)
 
-        # Determine facing direction by inspecting sprite patch below cap
-        y1, y2 = max(0, py - 6), min(h, py + 22)
-        x1, x2 = max(0, px - 12), min(w, px + 12)
-        patch = arr[y1:y2, x1:x2]
-        pr = patch[:, :, 0].astype(int)
-        pg = patch[:, :, 1].astype(int)
-        pb = patch[:, :, 2].astype(int)
-
-        # Skin tone pixels (Daytime + Nighttime shader)
-        day_skin = (pr > 210) & (pg > 140) & (pg < 220) & (pb > 90) & (pb < 170)
-        night_skin = (pr >= 85) & (pr <= 135) & (pg >= 50) & (pg <= 95) & (pr >= pg + 20)
-        skin_count = int(np.sum(day_skin | night_skin))
-
-        # Dark hair / back of cap pixels
-        dark_hair = (pr < 90) & (pg < 80) & (pb < 80)
-        hair_count = int(np.sum(dark_hair))
-
-        if skin_count >= 15:
-            facing = "DOWN"
-        elif hair_count >= 20 and skin_count < 8:
-            facing = "UP"
+        # Determine facing direction by inspecting the cap front (y=144..151) and left/right head profile (y=144..158).
+        # Previous skin-tone heuristic matched Red's brown backpack at y=162..164 when facing UP!
+        if 232 <= px <= 248 and 136 <= py <= 150:
+            patch_cap = arr[144:151, 234:246]
+            patch_L = arr[144:158, 230:238]
+            patch_R = arr[144:158, 242:250]
         else:
-            facing = "LEFT" if px < 240 else "RIGHT"
+            patch_cap = arr[max(0, py + 2):min(h, py + 9), max(0, px - 5):min(w, px + 7)]
+            patch_L = arr[max(0, py + 2):min(h, py + 16), max(0, px - 9):min(w, px - 1)]
+            patch_R = arr[max(0, py + 2):min(h, py + 16), max(0, px + 3):min(w, px + 11)]
+
+        cap_r = float(patch_cap[:, :, 0].mean()) if patch_cap.size > 0 else 0.0
+        cap_g = float(patch_cap[:, :, 1].mean()) if patch_cap.size > 0 else 0.0
+        lr_diff = (float(patch_L.mean()) - float(patch_R.mean())) if (patch_L.size > 0 and patch_R.size > 0) else 0.0
+
+        if lr_diff > 12.0:
+            facing = "LEFT"
+        elif lr_diff < -12.0:
+            facing = "RIGHT"
+        elif cap_g > 75.0 and (cap_r - cap_g) < 75.0:
+            facing = "DOWN"
+        else:
+            facing = "UP"
 
         return PlayerState(
             detected=True,
@@ -625,8 +666,11 @@ class ScreenAnalyzer:
         g_all = arr[:, :, 1].astype(int)
         b_all = arr[:, :, 2].astype(int)
 
-        # 1. Locate the central 5x4 green floor rug to anchor the entire room regardless of camera scroll
-        rug_mask = (r_all >= 80) & (r_all <= 130) & (g_all >= 175) & (g_all <= 220) & (b_all >= 100) & (b_all <= 145)
+        # 1. Locate the central 5x4 green floor rug to anchor the entire room regardless of camera scroll (Day + Night)
+        rug_mask = (
+            ((r_all >= 80) & (r_all <= 130) & (g_all >= 175) & (g_all <= 220) & (b_all >= 100) & (b_all <= 145)) |
+            ((r_all >= 45) & (r_all <= 90) & (g_all >= 100) & (g_all <= 150) & (b_all >= 45) & (b_all <= 95) & (g_all > r_all + 30) & (g_all > b_all + 30))
+        )
         rug_cols: List[int] = []
         rug_rows: List[int] = []
         for r in range(GRID_ROWS):
@@ -649,9 +693,8 @@ class ScreenAnalyzer:
 
         # Check for visible orange landing mat tile (excluding North Wall notice sign which has pure white interior)
         mat_pixels = (
-            (r_all > 190) &
-            (g_all > 110) & (g_all < 165) &
-            (b_all > 70) & (b_all < 125)
+            ((r_all > 190) & (g_all > 110) & (g_all < 165) & (b_all > 70) & (b_all < 125)) |
+            ((r_all > 115) & (g_all > 65) & (g_all < 110) & (b_all > 40) & (b_all < 85) & (r_all > g_all + 35))
         )
         pure_white = (r_all > 240) & (g_all > 240) & (b_all > 240)
         detected_mat_tile: Optional[Tuple[int, int]] = None
@@ -819,8 +862,11 @@ class ScreenAnalyzer:
         g_all = arr[:, :, 1].astype(int)
         b_all = arr[:, :, 2].astype(int)
 
-        # 1. Locate the central 6x4 green floor rug to anchor the room
-        rug_mask = (r_all >= 80) & (r_all <= 130) & (g_all >= 175) & (g_all <= 220) & (b_all >= 100) & (b_all <= 145)
+        # 1. Locate the central 6x4 green floor rug to anchor the room (Daytime + Nighttime/Dusk)
+        rug_mask = (
+            ((r_all >= 80) & (r_all <= 130) & (g_all >= 175) & (g_all <= 220) & (b_all >= 100) & (b_all <= 145)) |
+            ((r_all >= 45) & (r_all <= 90) & (g_all >= 100) & (g_all <= 150) & (b_all >= 45) & (b_all <= 95) & (g_all > r_all + 30) & (g_all > b_all + 30))
+        )
         rug_cols: List[int] = []
         rug_rows: List[int] = []
         for r in range(GRID_ROWS):
@@ -837,13 +883,14 @@ class ScreenAnalyzer:
         else:
             rug_c1, rug_c2, rug_r1, rug_r2 = 2, 7, 4, 7
 
-        # 2. Front Door Exit Mat: Strictly below the green rug (so Mom's red dress inside the rug is never matched)
+        # 2. Front Door Exit Mat: Strictly below the green rug (Daytime + Nighttime/Dusk)
         rug_bot_y = (rug_r2 + 1) * TILE_SIZE + GRID_Y_OFFSET - 8
         max_y_search = 215 if is_dialogue else self.target_height
         red_mat = (
-            (r_all > 165) &
-            (r_all > g_all + 35) &
-            (r_all > b_all + 35) &
+            (
+                ((r_all > 165) & (r_all > g_all + 35) & (r_all > b_all + 35)) |
+                ((r_all > 105) & (g_all < 65) & (b_all < 65) & (r_all > g_all + 50))
+            ) &
             (np.arange(self.target_height)[:, None] >= max(140, rug_bot_y)) &
             (np.arange(self.target_height)[:, None] < max_y_search)
         )
@@ -931,95 +978,168 @@ class ScreenAnalyzer:
         player: PlayerState,
         pois: List[POI],
         notes: List[str],
-        available_intents: List[str]
+        available_intents: List[str],
+        is_dialogue: bool = False,
+        is_start_menu: bool = False
     ):
         """Analyzes Professor Oak's Research Lab dynamically across any camera scroll position."""
         r_all = arr[:, :, 0].astype(int)
         g_all = arr[:, :, 1].astype(int)
         b_all = arr[:, :, 2].astype(int)
 
-        # 1. Dynamically locate the olive-green Starter Table (3 tiles wide x 1 tile tall on right side of Lab)
+        # Check if Follower Pikachu is standing on a cardinal tile adjacent to Red
+        pikachu_following = False
+        if player.detected:
+            for dc, dr in [(0, -1), (0, 1), (-1, 0), (1, 0)]:
+                nc, nr = player.tile_col + dc, player.tile_row + dr
+                if 0 <= nc < GRID_COLS and 0 <= nr < GRID_ROWS:
+                    px1, py1, px2, py2 = tile_bounds(nc, nr)
+                    pp = arr[max(0, py1):min(self.target_height, py2), max(0, px1):min(self.target_width, px2)]
+                    if pp.size > 0:
+                        ppr = pp[:, :, 0].astype(int)
+                        ppg = pp[:, :, 1].astype(int)
+                        ppb = pp[:, :, 2].astype(int)
+                        pika_yellow = float(np.mean(
+                            ((ppr > 195) & (ppg > 165) & (ppb < 95)) |
+                            ((ppr > 105) & (ppg > 90) & (ppb < 50) & (ppr > ppb + 55))
+                        ))
+                        if pika_yellow > 0.14:
+                            pikachu_following = True
+                            grid[nr, nc] = CELL_WALKABLE
+
+        # 1. Dynamically locate the olive-green Starter Table (3 tiles wide x 1 tile tall in Cols 7..11 of Lab)
+        # Exclude Col 1 and Col 13 where green potted plants sit near the south entrance!
         green_tbl = (g_all > r_all + 25) & (g_all > b_all + 25) & (g_all > 130) & (r_all > 80)
         tbl_cols: List[int] = []
         tbl_rows: List[int] = []
-        for r in range(1, GRID_ROWS - 1):
-            for c in range(5, GRID_COLS - 1):
+        for r in range(0, GRID_ROWS - 1):
+            for c in range(6, 12):
                 x1, y1, x2, y2 = tile_bounds(c, r)
                 patch = green_tbl[max(0, y1):min(self.target_height, y2), max(0, x1):min(self.target_width, x2)]
                 if patch.size > 0 and float(np.mean(patch)) > 0.20:
                     tbl_cols.append(c)
                     tbl_rows.append(r)
 
-        if tbl_cols and tbl_rows:
+        table_visible = (len(set(tbl_cols)) >= 2 and bool(tbl_rows))
+        has_pokeball = True
+        has_oak = True
+
+        if table_visible:
             tc1, tc2 = min(tbl_cols), max(tbl_cols)
             tr1 = min(tbl_rows)
+
+            ball_col = (tc1 + tc2) // 2
+            ball_row = tr1
+            oak_col = max(1, tc1 - 2)
+            oak_row = tr1
+            exit_col = max(1, tc1 - 2)
+            exit_row = min(GRID_ROWS - 1, tr1 + 6)
+
+            # Inspect whether the red/white Starter Poké Ball is on the table and whether Professor Oak is present
+            if not is_dialogue and not is_start_menu:
+                bx1, by1, bx2, by2 = tile_bounds(ball_col, ball_row)
+                b_patch = arr[max(0, by1 + 2):min(self.target_height, by2 - 10), max(0, bx1 + 6):min(self.target_width, bx2 - 6)]
+                red_ball_px = 0
+                if b_patch.size > 0:
+                    bpr = b_patch[:, :, 0].astype(int)
+                    bpg = b_patch[:, :, 1].astype(int)
+                    bpb = b_patch[:, :, 2].astype(int)
+                    red_ball_px = int(np.sum((bpr > 170) & (bpr > bpg + 40) & (bpr > bpb + 40)))
+                has_pokeball = (red_ball_px >= 15)
+
+                ox1, oy1, ox2, oy2 = tile_bounds(oak_col, oak_row)
+                o_patch = arr[max(0, oy1):min(self.target_height, oy2), max(0, ox1):min(self.target_width, ox2)]
+                oak_std = float(o_patch.std()) if o_patch.size > 0 else 0.0
+                has_oak = (oak_std >= 30.0) and not (player.detected and (player.tile_col, player.tile_row) == (oak_col, oak_row))
+
+            # 2. Mark Lab Walls, Bookshelves, Starter Table, and Oak as Obstacles
+            # North wall & upper bookshelves
+            for r in range(0, max(0, tr1 - 2)):
+                for c in range(GRID_COLS):
+                    if grid[r, c] != CELL_VOID:
+                        grid[r, c] = CELL_WALL
+
+            if 0 <= tr1 - 2 < GRID_ROWS:
+                for c in range(GRID_COLS):
+                    if (c <= tc1 - 3 or c >= tc1) and grid[tr1 - 2, c] != CELL_VOID:
+                        grid[tr1 - 2, c] = CELL_WALL
+
+            # Left Poké Ball machine table
+            for r in range(max(0, tr1 - 1), min(GRID_ROWS, tr1 + 1)):
+                for c in range(max(0, tc1 - 5), max(0, tc1 - 3)):
+                    if 0 <= c < GRID_COLS and grid[r, c] == CELL_WALKABLE:
+                        grid[r, c] = CELL_OBSTACLE
+
+            # Starter Table on the right
+            for c in range(tc1, min(GRID_COLS, tc2 + 1)):
+                if 0 <= tr1 < GRID_ROWS:
+                    grid[tr1, c] = CELL_OBSTACLE
+
+            # Professor Oak NPC tile (only mark as obstacle if Oak is present)
+            if has_oak and 0 <= oak_row < GRID_ROWS and 0 <= oak_col < GRID_COLS:
+                grid[oak_row, oak_col] = CELL_NPC
+
+            # Middle row of bookshelves (with 2-tile central aisle at tc1-3 .. tc1-2)
+            shelf_row = tr1 + 3
+            if 0 <= shelf_row < GRID_ROWS:
+                for c in range(GRID_COLS):
+                    if (c <= tc1 - 4 or c >= tc1 - 1) and grid[shelf_row, c] == CELL_WALKABLE:
+                        grid[shelf_row, c] = CELL_OBSTACLE
+
+            # Keep player's tile walkable
+            if player.detected and 0 <= player.tile_row < GRID_ROWS and 0 <= player.tile_col < GRID_COLS:
+                grid[player.tile_row, player.tile_col] = CELL_WALKABLE
+
+            grid[exit_row, exit_col] = CELL_WARP
+
+            starter_interact = (ball_col, min(GRID_ROWS - 1, ball_row + 1)) if ball_row + 1 < GRID_ROWS else (ball_col, max(1, ball_row - 1))
+            oak_interact = (oak_col, min(GRID_ROWS - 1, oak_row + 1)) if (not player.detected or player.tile_row >= oak_row) else (oak_col, max(1, oak_row - 1))
         else:
-            tc1, tc2, tr1 = 8, 10, 4
+            # South entrance of Professor Oak's Lab (Starter Table & Oak are still off-screen to the NORTH up the central aisle!):
+            # Keep the central aisle (Cols 6..8, Rows 0..4) completely walkable so Red walks straight UP!
+            for r in (0, 1):
+                for c in range(GRID_COLS):
+                    if (c <= 5 or c >= 9) and grid[r, c] == CELL_WALKABLE:
+                        grid[r, c] = CELL_OBSTACLE
+            for r in range(0, 5):
+                for c in (6, 7, 8):
+                    if grid[r, c] != CELL_VOID:
+                        grid[r, c] = CELL_WALKABLE
 
-        ball_col = (tc1 + tc2) // 2
-        ball_row = tr1
-        oak_col = max(1, tc1 - 2)
-        oak_row = tr1
-        exit_col = max(1, tc1 - 2)
-        exit_row = min(GRID_ROWS - 1, tr1 + 6)
+            if player.detected and 0 <= player.tile_row < GRID_ROWS and 0 <= player.tile_col < GRID_COLS:
+                grid[player.tile_row, player.tile_col] = CELL_WALKABLE
 
-        # 2. Mark Lab Walls, Bookshelves, Starter Table, and Oak as Obstacles
-        # North wall & upper bookshelves
-        for r in range(0, max(0, tr1 - 2)):
-            for c in range(GRID_COLS):
-                if grid[r, c] != CELL_VOID:
-                    grid[r, c] = CELL_WALL
-
-        if 0 <= tr1 - 2 < GRID_ROWS:
-            for c in range(GRID_COLS):
-                if (c <= tc1 - 3 or c >= tc1) and grid[tr1 - 2, c] != CELL_VOID:
-                    grid[tr1 - 2, c] = CELL_WALL
-
-        # Left Poké Ball machine table
-        for r in range(max(0, tr1 - 1), min(GRID_ROWS, tr1 + 1)):
-            for c in range(max(0, tc1 - 5), max(0, tc1 - 3)):
-                if 0 <= c < GRID_COLS and grid[r, c] == CELL_WALKABLE:
-                    grid[r, c] = CELL_OBSTACLE
-
-        # Starter Table on the right
-        for c in range(tc1, min(GRID_COLS, tc2 + 1)):
-            if 0 <= tr1 < GRID_ROWS:
-                grid[tr1, c] = CELL_OBSTACLE
-
-        # Professor Oak NPC tile
-        if 0 <= oak_row < GRID_ROWS and 0 <= oak_col < GRID_COLS:
-            grid[oak_row, oak_col] = CELL_NPC
-
-        # Middle row of bookshelves (with 2-tile central aisle at tc1-3 .. tc1-2)
-        shelf_row = tr1 + 3
-        if 0 <= shelf_row < GRID_ROWS:
-            for c in range(GRID_COLS):
-                if (c <= tc1 - 4 or c >= tc1 - 1) and grid[shelf_row, c] == CELL_WALKABLE:
-                    grid[shelf_row, c] = CELL_OBSTACLE
-
-        # Keep player's tile walkable
-        if player.detected and 0 <= player.tile_row < GRID_ROWS and 0 <= player.tile_col < GRID_COLS:
-            grid[player.tile_row, player.tile_col] = CELL_WALKABLE
-
-        grid[exit_row, exit_col] = CELL_WARP
+            ball_col, ball_row = 7, 0
+            starter_interact = (7, 0)
+            oak_col, oak_row = 7, 0
+            oak_interact = (7, 0)
+            last_floor_row = player.tile_row if player.detected else 4
+            for r in range(4, GRID_ROWS):
+                if grid[r, 7] != CELL_VOID:
+                    last_floor_row = r
+                    grid[r, 7] = CELL_WALKABLE
+            exit_col = 7
+            exit_row = min(GRID_ROWS - 1, last_floor_row + 1)
+            grid[exit_row, exit_col] = CELL_WARP
 
         # 3. Populate POIs
-        starter_interact = (ball_col, min(GRID_ROWS - 1, ball_row + 1)) if ball_row + 1 < GRID_ROWS else (ball_col, max(1, ball_row - 1))
         bpx, bpy = tile_to_pixel_center(ball_col, ball_row)
-        pois.append(POI(
+        starter_poi = POI(
             name="STARTER_TABLE",
             category="OBJECT",
             tile_col=ball_col,
             tile_row=ball_row,
             pixel_x=bpx,
             pixel_y=bpy,
-            description=f"Starter Poké Ball on table (Approach at Col {starter_interact[0]}, Row {starter_interact[1]} and press A)",
+            description=(
+                f"Starter Poké Ball on table (Approach at Col {starter_interact[0]}, Row {starter_interact[1]} and press A)"
+                if has_pokeball else "Empty Starter Table (Starter Poké Ball is not on the table)"
+            ),
             interaction_tile=starter_interact
-        ))
+        )
 
-        oak_interact = (oak_col, min(GRID_ROWS - 1, oak_row + 1)) if (not player.detected or player.tile_row >= oak_row) else (oak_col, max(1, oak_row - 1))
         opx, opy = tile_to_pixel_center(oak_col, oak_row)
-        pois.append(POI(
+        oak_poi = POI(
             name="PROFESSOR_OAK",
             category="NPC",
             tile_col=oak_col,
@@ -1028,28 +1148,46 @@ class ScreenAnalyzer:
             pixel_y=opy,
             description="Professor Oak",
             interaction_tile=oak_interact
-        ))
+        )
 
         epx, epy = tile_to_pixel_center(exit_col, exit_row)
-        pois.append(POI(
+        exit_poi = POI(
             name="LAB_EXIT",
             category="WARP",
             tile_col=exit_col,
             tile_row=exit_row,
             pixel_x=epx,
             pixel_y=epy,
-            description="South exit doorway back to Pallet Town",
+            description=(
+                "South exit doorway back to Pallet Town (Choose 'EXIT_ROOM' with target 'LAB_EXIT' to leave the Lab)"
+                if (not has_pokeball or pikachu_following)
+                else "South exit doorway back to Pallet Town (Do NOT exit before receiving starter Pokémon!)"
+            ),
             interaction_tile=(exit_col, exit_row)
-        ))
+        )
 
-        notes.extend([
-            "Red is inside Professor Oak's Research Lab.",
-            f"STARTER POKÉMON: Starter Poké Ball table is at Col {ball_col}, Row {ball_row} (Interact from Col {starter_interact[0]}, Row {starter_interact[1]}).",
-            f"NPC: Professor Oak is at Col {oak_col}, Row {oak_row}.",
-            f"EXIT: South doorway to Pallet Town is down the central aisle at Col {exit_col}, Row {exit_row}."
-        ])
+        if (table_visible and not has_pokeball) or pikachu_following:
+            pois.extend([exit_poi, oak_poi, starter_poi])
+        else:
+            pois.extend([starter_poi, oak_poi, exit_poi])
 
-        available_intents.extend(["GO_TO_POI", "TALK_TO_NPC", "EXIT_ROOM", "WAIT"])
+        notes.append("Red is inside Professor Oak's Research Lab.")
+        if table_visible and not has_pokeball and not has_oak:
+            notes.append(
+                f"LAB_TABLE_EMPTY (OAK NOT HERE): Professor Oak and the Starter Poké Ball are NOT in the Lab yet! Choose 'EXIT_ROOM' with target 'LAB_EXIT' at Col {exit_col}, Row {exit_row} to leave the Lab and walk NORTH to the tall grass exit of Pallet Town to trigger Professor Oak!"
+            )
+        elif (table_visible and not has_pokeball and has_oak) or pikachu_following:
+            notes.append(
+                f"STARTER_ALREADY_CLAIMED (LAB_TABLE_EMPTY): Red has already received his Starter Pikachu! Choose 'EXIT_ROOM' with target 'LAB_EXIT' at Col {exit_col}, Row {exit_row} to walk SOUTH and exit Professor Oak's Lab into Pallet Town!"
+            )
+        else:
+            notes.extend([
+                f"STARTER POKÉMON: Starter Poké Ball table is NORTH at Col {ball_col}, Row {ball_row} (Target 'STARTER_TABLE' at Col {starter_interact[0]}, Row {starter_interact[1]}).",
+                f"NPC: Professor Oak is NORTH at Col {oak_col}, Row {oak_row}.",
+                f"EXIT: South doorway to Pallet Town is at Col {exit_col}, Row {exit_row} (Do NOT step DOWN onto exit unless leaving!)."
+            ])
+
+        available_intents.extend(["GO_TO_POI", "TALK_TO_NPC", "EXPLORE_NORTH", "EXIT_ROOM", "WAIT"])
 
     def _analyze_pokecenter(
         self,
@@ -1212,11 +1350,13 @@ class ScreenAnalyzer:
         player: PlayerState,
         pois: List[POI],
         notes: List[str],
-        available_intents: List[str]
+        available_intents: List[str],
+        is_dialogue: bool = False
     ):
         """Analyzes outdoor Overworld (Pallet Town, Route 1, Viridian City): maps trees, ledges, fences, tall grass, buildings, and doors."""
         h, w, _ = arr.shape
         tree_mask_grid = np.zeros((GRID_ROWS, GRID_COLS), dtype=bool)
+        pikachu_following = False
 
         # 1. Build 15x10 Overworld Collision Grid
         for r in range(GRID_ROWS):
@@ -1239,15 +1379,18 @@ class ScreenAnalyzer:
                         fpb = full_patch[:, :, 2].astype(int)
                         pika_yellow = float(np.mean(
                             ((fpr > 195) & (fpg > 165) & (fpb < 95)) |
-                            ((fpr > 105) & (fpg > 90) & (fpb < 50) & (fpr > fpb + 55))
+                            ((fpr > 95) & (fpg > 80) & (fpb < 60) & (fpr > fpb + 40) & (fpg > fpb + 25))
                         ))
-                        if pika_yellow > 0.12:
+                        ground_bg = float(np.mean(fpb >= fpr - 10))
+                        if pika_yellow > 0.08 and ground_bg >= 0.20 and int(full_patch.min()) <= 24:
+                            pikachu_following = True
                             grid[r, c] = CELL_WALKABLE
                             continue
 
-                # For the tile directly NORTH of Red, inspect upper 14px so Red's cap top doesn't trigger an obstacle
+                # For the tile directly NORTH of Red, inspect upper 24px (excluding bottom 8px where Red's cap pokes up)
+                # so brown ledges or obstacles on Row 3 are still detected!
                 if player.detected and c == player.tile_col and r == player.tile_row - 1:
-                    y2_c = min(y2_c, y1_c + 14)
+                    y2_c = min(y2_c, y1_c + 24)
 
                 if y2_c <= y1_c or x2_c <= x1_c:
                     continue
@@ -1269,12 +1412,8 @@ class ScreenAnalyzer:
                     (top4[:, :, 2].astype(int) >= 75)
                 )) if top4.size > 0 else 0.0
 
-                green_foliage = float(np.mean((pg > pr + 22) & (pg >= pb)))
-                tree_shadow = float(np.mean((pr < 30) & (pg < 45) & (pb < 25)))
-                slate_struct = float(np.mean((pb > pg + 12) & (pr < 65)))
                 is_tall_grass = (
-                    (all_green >= 0.72 and 0.26 <= lawn_backdrop <= 0.55 and top4_lawn >= 0.60)
-                    or (green_foliage > 0.50 and tree_shadow < 0.06 and slate_struct < 0.08)
+                    all_green >= 0.72 and 0.26 <= lawn_backdrop <= 0.55 and top4_lawn >= 0.60
                 )
 
                 # Check if Pine / Forest Tree tile (impassable canopy with low lawn_backdrop)
@@ -1287,14 +1426,14 @@ class ScreenAnalyzer:
                 water_px = float(np.mean((pb > pg + 25) & (pb > pr + 30)))
                 min_channel = int(patch.min())
                 is_flat_ground = (
-                    (std_val < 16.5 or (std_val < 26.0 and min_channel >= 75 and all_green > 0.25))
+                    (std_val < 16.5 or (std_val < 26.0 and min_channel >= 50 and all_green > 0.25))
                     and roof_px < 0.35
                     and water_px < 0.45
                 )
 
-                # B) Walkable flowers (lawn grass background + red petals)
+                # B) Walkable flowers (lawn grass background + bright red flower petals, never brown ledges)
                 lawn_bg = float(np.mean((pg > pr + 18) & (pg > 70)))
-                red_petal = float(np.mean((pr > pg + 25) & (pr > pb + 15) & (pg < 75)))
+                red_petal = float(np.mean((pr > pg + 50) & (pr > pb + 40) & ((pr > 175) | (pg < 55))))
                 is_flowers = (lawn_bg >= 0.35 and red_petal >= 0.08)
 
                 if is_flat_ground or is_flowers or is_tall_grass:
@@ -1302,11 +1441,45 @@ class ScreenAnalyzer:
                 else:
                     grid[r, c] = CELL_OBSTACLE
 
+        # 1b. Top-left white area-name popup banner (y=6..38, x=12..240, e.g. 'ROUTE 1' or 'VIRIDIAN CITY'):
+        # Inherit walkability from Row 1 for Cols 0..7 so the popup sign doesn't block northern pathfinding!
+        banner_patch = arr[6:38, 12:240]
+        if banner_patch.size > 0:
+            banner_white = float(np.mean(
+                (banner_patch[:, :, 0] > 235) & (banner_patch[:, :, 1] > 235) & (banner_patch[:, :, 2] > 235)
+            ))
+            if banner_white > 0.50:
+                for c in range(0, 8):
+                    grid[0, c] = grid[1, c]
+                    tree_mask_grid[0, c] = tree_mask_grid[1, c]
+                notes.append("AREA TRANSITION BANNER visible at top-left of screen.")
+
+        if pikachu_following:
+            notes.append("PIKACHU_FOLLOWING: Starter Pikachu is following Red!")
+
+        # 1c. Pitched Roof Apex Passability:
+        # In GBA Pokémon games, the 1-tile triangular peak at the top center of a house roof
+        # (flanked by walkable road on both left and right, with the 3-tile building roof directly below)
+        # is an overhead-layer sprite that Red can walk behind!
+        for r in range(0, GRID_ROWS - 1):
+            for c in range(1, GRID_COLS - 1):
+                if (
+                    grid[r, c] == CELL_OBSTACLE
+                    and not tree_mask_grid[r, c]
+                    and grid[r, c - 1] == CELL_WALKABLE
+                    and grid[r, c + 1] == CELL_WALKABLE
+                    and grid[r + 1, c - 1] == CELL_OBSTACLE
+                    and grid[r + 1, c] == CELL_OBSTACLE
+                    and grid[r + 1, c + 1] == CELL_OBSTACLE
+                ):
+                    grid[r, c] = CELL_WALKABLE
+
         # 2. Detect Building Front Walls & Doors (at least 2 tiles tall, architectural non-foliage structure, with walkable path below)
         found_target_warp = False
         just_exited_house = False
+        max_wall_row = 6 if is_dialogue else (GRID_ROWS - 1)
 
-        for r in range(1, GRID_ROWS - 1):
+        for r in range(1, max_wall_row):
             c = 0
             while c < GRID_COLS:
                 if grid[r, c] != CELL_WALKABLE and not tree_mask_grid[r, c] and grid[r - 1, c] != CELL_WALKABLE and not tree_mask_grid[r - 1, c]:
@@ -1322,12 +1495,12 @@ class ScreenAnalyzer:
                     c_end = c - 1
                     width = c_end - c_start + 1
 
-                    # Check if this row is the bottom front wall of a building (walkable tiles directly below it)
+                    # Check if this row is the bottom front wall of a building (walkable tiles directly below it, or row 5 above dialogue box)
                     walkable_below = [
                         col for col in range(c_start, c_end + 1)
                         if grid[r + 1, col] == CELL_WALKABLE
                     ]
-                    if width >= 3 and len(walkable_below) >= 2:
+                    if width >= 3 and (len(walkable_below) >= 1 or (is_dialogue and r == 5)):
                         # Verify this 2-row structure is architectural (roof + wall) and not Route 1 foliage/ledges
                         bx1, by1, _, _ = tile_bounds(c_start, r - 1)
                         _, _, bx2, by2 = tile_bounds(c_end, r)
@@ -1346,37 +1519,87 @@ class ScreenAnalyzer:
 
                         best_door_col = None
                         best_score = -1.0
+                        best_door_kind = "RED"
                         # Include c_end when building is clipped at right screen edge (e.g., Oak's Lab door at Col 14)
                         search_end = (c_end + 1) if c_end == GRID_COLS - 1 else c_end
                         for col in range(c_start + 1, search_end):
-                            if grid[r + 1, col] != CELL_WALKABLE:
+                            if grid[r + 1, col] != CELL_WALKABLE and not (is_dialogue and r == 5):
                                 continue
                             x1, y1, x2, y2 = tile_bounds(col, r)
                             dp = arr[max(0, y1 + 6):min(h, y1 + 28), max(0, x1 + 4):min(w, x1 + 28)]
-                            if dp.size == 0:
+                            if dp.size == 0 or float(dp.std()) < 22.0:
                                 continue
                             dr = dp[:, :, 0].astype(int)
                             dg = dp[:, :, 1].astype(int)
                             db = dp[:, :, 2].astype(int)
-                            # 1) Red/Orange/Crimson wooden house door
+                            # 1) Red/Orange/Crimson wooden house door (Daytime + Nighttime)
                             red_door = float(np.mean(
                                 ((dr > dg + 42) & (dr > db + 35) & (dg < 125)) |
                                 ((dr > dg + 18) & (dr > db + 10) & (dr > 55) & (dg < 70))
                             ))
-                            # 2) Green/Teal door (Professor Oak's Lab & Rival's House)
-                            teal_door = float(np.mean((dg > dr + 18) & (dg > 95)))
-                            # 3) Blue/Cyan sliding glass door (Poké Center & Poké Mart)
-                            blue_door = float(np.mean((db > dr + 25) & (dg > dr + 12) & (db > 120)))
+                            # 2) Green/Teal door (Professor Oak's Lab & Rival's House, Daytime + Nighttime)
+                            teal_door = float(np.mean(
+                                ((dg > dr + 18) & (dg > 95)) |
+                                ((dg > dr + 18) & (db > dr + 18) & (dg > 45) & (dr < 48))
+                            ))
+                            # 3) Blue/Cyan sliding glass door (Poké Center & Poké Mart, Daytime + Nighttime)
+                            blue_door = float(np.mean(
+                                ((db > dr + 25) & (dg > dr + 12) & (db > 120)) |
+                                ((db > dr + 45) & (db > dg + 25) & (db > 95) & (dr < 55))
+                            ))
                             door_score = max(red_door, teal_door, blue_door)
                             if door_score > best_score:
                                 best_score = door_score
                                 best_door_col = col
+                                if blue_door >= red_door and blue_door >= teal_door:
+                                    best_door_kind = "BLUE"
+                                elif teal_door >= red_door:
+                                    best_door_kind = "TEAL"
+                                else:
+                                    best_door_kind = "RED"
+
+                        # Also check for an open doorway mid-animation (e.g., Oak's Lab sliding door open into dark gray doorway)
+                        if best_score < 0.45 and width >= 5:
+                            mid_col = (c_start + c_end) // 2
+                            if grid[r + 1, mid_col] == CELL_WALKABLE:
+                                x1, y1, x2, y2 = tile_bounds(mid_col, r)
+                                dp = arr[max(0, y1 + 6):min(h, y1 + 28), max(0, x1 + 4):min(w, x1 + 28)]
+                                wx1, wy1, wx2, wy2 = tile_bounds(max(0, mid_col - 1), r)
+                                wp = arr[max(0, wy1):min(h, wy2), max(0, wx1):min(w, wx2)]
+                                rx1, ry1, rx2, ry2 = tile_bounds(mid_col, max(0, r - 1))
+                                rp = arr[max(0, ry1):min(h, ry2), max(0, rx1):min(w, rx2)]
+                                if dp.size > 0 and wp.size > 0 and rp.size > 0:
+                                    dp_mean = float(dp.mean())
+                                    wp_mean = float(wp.mean())
+                                    roof_r = float(rp[:, :, 0].mean())
+                                    roof_g = float(rp[:, :, 1].mean())
+                                    if dp_mean < 125.0 and wp_mean > dp_mean + 35.0 and roof_r < roof_g + 25.0:
+                                        best_door_col = mid_col
+                                        best_score = 0.50
+                                        best_door_kind = "TEAL"
+
+                        # Check if this building is Professor Oak's Lab (teal/green or open lab door without Poké Mart blue roof)
+                        is_oaks_lab_building = False
+                        if best_door_col is not None and best_score >= 0.25 and best_door_kind == "TEAL":
+                            rx1, ry1, rx2, ry2 = tile_bounds(best_door_col, max(0, r - 1))
+                            roof_patch = arr[max(0, ry1):min(h, ry2), max(0, rx1):min(w, rx2)]
+                            roof_r = float(roof_patch[:, :, 0].mean()) if roof_patch.size > 0 else 0.0
+                            roof_g = float(roof_patch[:, :, 1].mean()) if roof_patch.size > 0 else 0.0
+                            roof_b = float(roof_patch[:, :, 2].mean()) if roof_patch.size > 0 else 0.0
+                            if roof_g > roof_r + 2.0 and not (roof_b > roof_r + 12.0):
+                                # Horizontal fence over green lawn grass (not a building roof)
+                                best_door_col = None
+                                best_score = -1.0
+                            elif not (roof_b > roof_r + 12) and not (is_dialogue and r == 2):
+                                is_oaks_lab_building = True
 
                         # Check if Red is standing right in front of this building having just exited it
+                        # Never suppress Professor Oak's Lab as EXITED_HOUSE_DOOR so Red can always enter Oak's Lab!
                         is_exited_building = (
                             player.detected
                             and r == player.tile_row - 1
                             and c_start <= player.tile_col <= c_end
+                            and not is_oaks_lab_building
                         )
 
                         if is_exited_building:
@@ -1401,13 +1624,26 @@ class ScreenAnalyzer:
                             if best_door_col + 1 < GRID_COLS:
                                 grid[r, best_door_col + 1] = CELL_WALL
                             dpx, dpy = tile_to_pixel_center(best_door_col, r)
-                            is_lab_door = (width >= 6 or (c_end == GRID_COLS - 1 and r >= 6))
-                            door_name = "OAKS_LAB" if is_lab_door else "BUILDING_DOOR"
-                            door_desc = (
-                                "Professor Oak's Lab Entrance Door (Walk onto this doorway to enter)"
-                                if door_name == "OAKS_LAB"
-                                else "Building Entrance Door (Walk onto this doorway to enter)"
-                            )
+
+                            # Determine specific building door type from door, roof, and wall color
+                            rx1, ry1, rx2, ry2 = tile_bounds(best_door_col, max(0, r - 1))
+                            roof_patch = arr[max(0, ry1):min(h, ry2), max(0, rx1):min(w, rx2)]
+                            roof_r = float(roof_patch[:, :, 0].mean()) if roof_patch.size > 0 else 0.0
+                            roof_b = float(roof_patch[:, :, 2].mean()) if roof_patch.size > 0 else 0.0
+
+                            if best_door_kind in ("BLUE", "TEAL") and roof_b > roof_r + 12:
+                                door_name = "POKEMART_DOOR"
+                                door_desc = "Poké Mart Entrance Door (Walk onto this doorway to enter)"
+                            elif best_door_kind == "BLUE" and roof_r > roof_b + 15:
+                                door_name = "POKECENTER_DOOR"
+                                door_desc = "Pokémon Center Entrance Door (Walk onto this doorway to enter)"
+                            elif is_oaks_lab_building:
+                                door_name = "OAKS_LAB"
+                                door_desc = "Professor Oak's Lab Entrance Door (Walk onto this doorway to enter)"
+                            else:
+                                door_name = "BUILDING_DOOR"
+                                door_desc = "Building Entrance Door (Walk onto this doorway to enter)"
+
                             pois.insert(0, POI(
                                 name=door_name,
                                 category="WARP",
@@ -1422,41 +1658,172 @@ class ScreenAnalyzer:
                 else:
                     c += 1
 
-        # 3. Check if Professor Oak's Lab is partially visible on the East/Southeast edge (or when routing Southeast in Pallet Town)
-        if not found_target_warp:
-            right_edge_building_rows = [
-                r for r in range(4, GRID_ROWS)
-                if grid[r, GRID_COLS - 1] != CELL_WALKABLE and not tree_mask_grid[r, GRID_COLS - 1]
-            ]
-            if len(right_edge_building_rows) >= 2 or just_exited_house:
-                # Find the best walkable tile on the Southeast corridor (Cols 11..13, Rows 8..9)
-                se_candidates = [
-                    (12, 9), (11, 9), (13, 9),
-                    (12, 8), (11, 8), (13, 8),
-                    (14, 9), (14, 8)
-                ]
-                se_target = None
-                for sc, sr in se_candidates:
-                    if 0 <= sc < GRID_COLS and 0 <= sr < GRID_ROWS and grid[sr, sc] == CELL_WALKABLE:
-                        se_target = (sc, sr)
-                        break
+        # If both West and East house doors in Pallet Town are visible, label West as Mom's House and East as Rival's House
+        house_doors = [p for p in pois if p.name == "BUILDING_DOOR"]
+        if len(house_doors) >= 2:
+            house_doors_sorted = sorted(house_doors, key=lambda p: p.tile_col)
+            west_door = house_doors_sorted[0]
+            east_door = house_doors_sorted[-1]
+            if west_door.tile_col <= 6 and east_door.tile_col >= 9:
+                west_door.description = "Red's / Mom's House Entrance Door (West house in Pallet Town — Walk onto this doorway to enter Mom's House)"
+                east_door.description = "Rival's / Daisy's House Entrance Door (East house in Pallet Town)"
+                # Ensure West door (Mom's House) is listed before East door
+                pois.remove(west_door)
+                pois.insert(0, west_door)
 
-                if se_target is not None:
-                    sc, sr = se_target
-                    spx, spy = tile_to_pixel_center(sc, sr)
-                    pois.insert(0, POI(
-                        name="OAKS_LAB",
-                        category="WARP",
-                        tile_col=sc,
-                        tile_row=sr,
-                        pixel_x=spx,
-                        pixel_y=spy,
-                        description="Southeast path around fence alongside Professor Oak's Lab leading to the Lab entrance",
-                        interaction_tile=(sc, sr)
-                    ))
-                    notes.append(
-                        f"OAK'S LAB ROUTE: Professor Oak's Lab is to the SOUTHEAST! Choose 'EXPLORE_SOUTHEAST', 'GO_TO_POI', or 'ENTER_BUILDING' with target 'OAKS_LAB' to route around the fence to Tile (Col {sc}, Row {sr})."
-                    )
+        # 2b. Check top 16px strip (y = 0..16, above Row 0) for Professor Oak's Lab front wall & door
+        # when Red has walked 1 row South of Oak's Lab so the doorway is at the very top edge of the screen.
+        if not found_target_warp and not is_dialogue:
+            top_wall_cols = [
+                col for col in range(GRID_COLS)
+                if float(arr[0:16, col * TILE_SIZE:(col + 1) * TILE_SIZE].std()) >= 24.0
+                and grid[0, col] == CELL_WALKABLE
+            ]
+            tc = 0
+            while tc < GRID_COLS and not found_target_warp:
+                if tc in top_wall_cols:
+                    cs = tc
+                    while tc < GRID_COLS and tc in top_wall_cols:
+                        tc += 1
+                    ce = tc - 1
+                    if ce - cs + 1 >= 4:
+                        for col in range(cs + 1, ce):
+                            dp = arr[0:16, col * TILE_SIZE + 4:(col + 1) * TILE_SIZE - 4]
+                            if dp.size == 0 or float(dp.std()) < 22.0:
+                                continue
+                            dr = dp[:, :, 0].astype(int)
+                            dg = dp[:, :, 1].astype(int)
+                            db = dp[:, :, 2].astype(int)
+                            teal_top = float(np.mean(
+                                ((dg > dr + 18) & (dg > 95)) |
+                                ((dg > dr + 18) & (db > dr + 18) & (dg > 45) & (dr < 48))
+                            ))
+                            lp = arr[0:16, (col - 1) * TILE_SIZE:col * TILE_SIZE]
+                            rp = arr[0:16, (col + 1) * TILE_SIZE:(col + 2) * TILE_SIZE]
+                            lr_c, lg_c, lb_c = lp[:, :, 0].astype(int), lp[:, :, 1].astype(int), lp[:, :, 2].astype(int)
+                            rr_c, rg_c, rb_c = rp[:, :, 0].astype(int), rp[:, :, 1].astype(int), rp[:, :, 2].astype(int)
+                            teal_l = float(np.mean(
+                                ((lg_c > lr_c + 18) & (lg_c > 95)) |
+                                ((lg_c > lr_c + 18) & (lb_c > lr_c + 18) & (lg_c > 45) & (lr_c < 48))
+                            ))
+                            teal_r = float(np.mean(
+                                ((rg_c > rr_c + 18) & (rg_c > 95)) |
+                                ((rg_c > rr_c + 18) & (rb_c > rr_c + 18) & (rg_c > 45) & (rr_c < 48))
+                            ))
+                            if (
+                                teal_top >= 0.30
+                                and teal_l < 0.05
+                                and teal_r < 0.05
+                                and float(lp.std()) >= 28.0
+                                and float(rp.std()) >= 28.0
+                            ):
+                                grid[0, col] = CELL_WARP
+                                dpx, dpy = tile_to_pixel_center(col, 0)
+                                pois.insert(0, POI(
+                                    name="OAKS_LAB",
+                                    category="WARP",
+                                    tile_col=col,
+                                    tile_row=0,
+                                    pixel_x=dpx,
+                                    pixel_y=dpy,
+                                    description=f"Professor Oak's Lab Entrance Door at top edge (Walk to ({col}, 0) and step UP to enter)",
+                                    interaction_tile=(col, 0)
+                                ))
+                                found_target_warp = True
+                                notes.append(
+                                    f"Professor Oak's Lab entrance door is visible at the top edge ({col}, 0). Choose 'ENTER_BUILDING' with target 'OAKS_LAB'!"
+                                )
+                                break
+                else:
+                    tc += 1
+
+        # 2c. South Pallet Town Pond & Fence Landmark:
+        # If Red overshot South of Professor Oak's Lab (standing beside the Southwest Pallet Town Pond at Cols 1..6, Rows 2..9
+        # with the Lab fence across Cols 8..13 on Rows 1..3 and open path at Row 0, Cols 8..13), place OAKS_LAB at (12, 0)
+        # so Red routes NORTH around the fence directly back to Professor Oak's Lab!
+        if not found_target_warp and not is_dialogue:
+            water_count = 0
+            for wr in range(2, GRID_ROWS):
+                for wc in range(1, 7):
+                    wx1, wy1, wx2, wy2 = tile_bounds(wc, wr)
+                    wp = arr[max(0, wy1 + 4):min(h, wy2 - 4), max(0, wx1 + 4):min(w, wx2 - 4)]
+                    if wp.size > 0:
+                        wr_c = wp[:, :, 0].astype(int)
+                        wg_c = wp[:, :, 1].astype(int)
+                        wb_c = wp[:, :, 2].astype(int)
+                        w_px = float(np.mean(
+                            ((wb_c > wr_c + 35) & (wb_c > wg_c + 10) & (wr_c < 95)) |
+                            ((wb_c > wr_c + 55) & (wb_c > wg_c + 40) & (wb_c > 95) & (wr_c < 55))
+                        ))
+                        if w_px > 0.45:
+                            water_count += 1
+            fence_east = any(
+                sum(1 for fc in range(8, 14) if grid[fr, fc] != CELL_WALKABLE) >= 4
+                for fr in range(1, 4)
+            )
+            walkable_north_east = (
+                sum(1 for fc in range(8, 14) if grid[0, fc] == CELL_WALKABLE) >= 4
+                and grid[0, 12] == CELL_WALKABLE
+            )
+            if water_count >= 8 and fence_east and walkable_north_east:
+                grid[0, 12] = CELL_WARP
+                dpx, dpy = tile_to_pixel_center(12, 0)
+                pois.insert(0, POI(
+                    name="OAKS_LAB",
+                    category="WARP",
+                    tile_col=12,
+                    tile_row=0,
+                    pixel_x=dpx,
+                    pixel_y=dpy,
+                    description="Professor Oak's Lab Entrance (North/Northeast behind the fence at (12, 0))",
+                    interaction_tile=(12, 0)
+                ))
+                found_target_warp = True
+                notes.append(
+                    "OVERSHOT OAK'S LAB: Red walked too far South past Professor Oak's Lab to the Pallet Town Pond! Oak's Lab is NORTH/NORTHEAST behind the fence at (12, 0). Choose 'ENTER_BUILDING' with target 'OAKS_LAB' or 'EXPLORE_NORTH'!"
+                )
+
+        if just_exited_house and not found_target_warp:
+            notes.append(
+                "JUST EXITED BUILDING: If heading to Professor Oak's Lab in Southeast Pallet Town, choose 'EXPLORE_SOUTHEAST' or 'EXPLORE_SOUTH' to walk around the house and fence."
+            )
+
+        # 3. Compute BFS Directional Reachability from Red's current tile so the LLM knows which directions are OPEN vs BLOCKED (dead ends)
+        sc_col = player.tile_col if player.detected else 7
+        sr_row = player.tile_row if player.detected else 4
+        reachable_tiles = {(sc_col, sr_row)}
+        bfs_q = deque([(sc_col, sr_row)])
+        while bfs_q:
+            cc, cr = bfs_q.popleft()
+            for dc, dr in [(0, -1), (0, 1), (-1, 0), (1, 0)]:
+                nc, nr = cc + dc, cr + dr
+                if 0 <= nc < GRID_COLS and 0 <= nr < GRID_ROWS and (nc, nr) not in reachable_tiles:
+                    if grid[nr, nc] in (CELL_WALKABLE, CELL_WARP):
+                        reachable_tiles.add((nc, nr))
+                        bfs_q.append((nc, nr))
+
+        dir_reachability = {
+            "NORTH": any(r <= sr_row - 2 for _, r in reachable_tiles),
+            "SOUTH": any(r >= sr_row + 2 for _, r in reachable_tiles),
+            "EAST": any(c >= sc_col + 2 for c, _ in reachable_tiles),
+            "WEST": any(c <= sc_col - 2 for c, _ in reachable_tiles),
+            "NORTHEAST": any(c >= sc_col + 1 and r <= sr_row - 1 and (c - sc_col) + (sr_row - r) >= 3 for c, r in reachable_tiles),
+            "NORTHWEST": any(c <= sc_col - 1 and r <= sr_row - 1 and (sc_col - c) + (sr_row - r) >= 3 for c, r in reachable_tiles),
+            "SOUTHEAST": any(c >= sc_col + 1 and r >= sr_row + 1 and (c - sc_col) + (r - sr_row) >= 3 for c, r in reachable_tiles),
+            "SOUTHWEST": any(c <= sc_col - 1 and r >= sr_row + 1 and (sc_col - c) + (r - sr_row) >= 3 for c, r in reachable_tiles),
+        }
+
+        open_dirs = [d for d, is_open in dir_reachability.items() if is_open]
+        blocked_dirs = [d for d, is_open in dir_reachability.items() if not is_open]
+
+        if blocked_dirs:
+            notes.append(
+                f"BLOCKED DIRECTIONS (STUCK / DEAD END): Cannot move {', '.join(blocked_dirs)} from here — completely blocked by impassable trees/walls/water! Do NOT choose {', '.join('EXPLORE_' + d for d in blocked_dirs)}!"
+            )
+        if open_dirs:
+            notes.append(
+                f"OPEN EXPLORATION DIRECTIONS: {', '.join('EXPLORE_' + d for d in open_dirs)}."
+            )
 
         notes.extend([
             "Red is outdoors in the Overworld.",
@@ -1464,20 +1831,13 @@ class ScreenAnalyzer:
             "Ledges can only be hopped going SOUTH. You cannot jump UP over brown ledges."
         ])
 
-        available_intents.extend([
-            "GO_TO_POI",
-            "ENTER_BUILDING",
-            "EXPLORE_SOUTHEAST",
-            "EXPLORE_SOUTH",
-            "EXPLORE_EAST",
-            "EXPLORE_NORTH",
-            "EXPLORE_WEST",
-            "EXPLORE_NORTHEAST",
-            "EXPLORE_NORTHWEST",
-            "EXPLORE_SOUTHWEST",
-            "TALK_TO_NPC",
-            "WAIT"
-        ])
+        available_intents.extend(["GO_TO_POI", "ENTER_BUILDING"])
+        if open_dirs:
+            for d in open_dirs:
+                available_intents.append(f"EXPLORE_{d}")
+        else:
+            available_intents.extend(["EXPLORE_NORTH", "EXPLORE_WEST", "EXPLORE_SOUTH", "EXPLORE_EAST"])
+        available_intents.extend(["TALK_TO_NPC", "WAIT"])
 
     # -------------------------------------------------------------------------
     # Visual Annotation Generator (Dual Debug #1)

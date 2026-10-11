@@ -10,11 +10,11 @@ from datetime import datetime
 
 DEFAULT_AREA_WAYPOINTS: Dict[str, List[str]] = {
     "Pallet Town": [
-        "Daisy's House (Town Map): NORTHEAST (top-right) house with pitched roof. Daisy is sitting at the table inside. Talk to her to receive the Town Map!",
-        "Oak's Lab (NOT DAISY'S HOUSE!): SOUTHEAST (bottom-right) large yellow building with circular porthole windows and sign. Daisy DOES NOT live here! Do NOT enter Oak's Lab looking for Daisy!",
-        "Route from Oak's Lab to Daisy's House: Step DOWN from lab door, walk LEFT around fence into open central square, walk UP (north) past the houses, then turn RIGHT into the northeast house!",
-        "Mom's House: Top-left house with red welcome mat.",
-        "Route 1: North exit through fence into tall grass (leads to Viridian City)."
+        "Triggering Professor Oak: If Oak's Lab is empty, walk NORTH into the tall grass exit at the top of Pallet Town to trigger Professor Oak's Pikachu capture event.",
+        "Oak's Lab: SOUTHEAST (bottom-right) large building with green/teal door. Inside, walk to the green Starter Table on the right and press A on the Poké Ball to claim Starter Pikachu!",
+        "Mom's House (Red's House): NORTHWEST (top-left) house with red door. Talk to Mom at the dining table to say goodbye / heal your party before leaving town.",
+        "Daisy's House (Rival's House): NORTHEAST (top-right) house. Talk to Daisy at the table to receive the Town Map.",
+        "Route 1: North exit through the 2-tile gap into tall grass (leads NORTH to Viridian City)."
     ],
     "Route 1": [
         "1st Ledge (South): The opening is immediately LEFT of the Route 1 signpost! Walk LEFT to the grass gap and walk UP onto the road.",
@@ -199,17 +199,24 @@ class MemoryManager:
             print(f"[MemoryManager] Supplies updated -> Potions: {self.supplies['potions']}")
 
     def apply_party_update(self, update_text: str):
-        """Parses natural language party update (e.g. 'Caught Pidgey Lv3', 'Pikachu reached Lv7')."""
+        """Parses natural language party update (e.g. 'Caught Pidgey Lv3', 'Received Pikachu Lv5', 'Pikachu reached Lv7')."""
         if not update_text or not isinstance(update_text, str) or update_text.strip().upper() == "NULL":
             return
         txt = update_text.strip()
         import re
-        catch_match = re.search(r'(?:caught|added|got)\s+([A-Za-z]+)(?:\s*(?:lv|level)\s*(\d+))?', txt, re.IGNORECASE)
+        catch_match = re.search(
+            r'(?:caught|added|got|received|chose|obtained|claimed|starter)\s+(?:starter\s+)?([A-Za-z]+)(?:\s*(?:lv|level)\s*(\d+))?',
+            txt,
+            re.IGNORECASE
+        )
         if catch_match:
             species = catch_match.group(1).capitalize()
-            level = int(catch_match.group(2)) if catch_match.group(2) else 3
+            default_lvl = 5 if species.lower() == "pikachu" else 3
+            level = int(catch_match.group(2)) if catch_match.group(2) else default_lvl
             if not any(p.get("species", "").lower() == species.lower() for p in self.team):
-                self.team.append({"species": species, "level": level, "lead": False, "key_moves": []})
+                is_lead = len(self.team) == 0
+                moves = ["ThunderShock", "Growl"] if species.lower() == "pikachu" else []
+                self.team.append({"species": species, "level": level, "lead": is_lead, "key_moves": moves})
                 print(f"[MemoryManager] Team member added: {species} Lv{level}")
                 self.save()
 

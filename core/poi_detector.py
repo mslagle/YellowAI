@@ -1,226 +1,89 @@
 """
 POI (Points of Interest) and Screen Feature Detector for YellowAI.
-Uses fast NumPy matrix operations (< 5ms) to detect key game objects, warps,
-obstacles, and player orientation directly from screen captures.
-Provides grounded spatial awareness to the VLM so it never hallucinates fake doors
-or attempts to press 'A' to use stairs/doorways.
+Delegates spatial perception to ScreenAnalyzer so both interfaces share the same
+high-accuracy NumPy scene classifier, player localization, and POI detector.
 """
 
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional
 import numpy as np
 from PIL import Image
+
+from core.screen_analyzer import ScreenAnalyzer
 
 
 class POIDetector:
     """
-    Performs fast rule-based spatial analysis on GBA frames.
-    Detects:
-    1. Player character (position, facing direction).
-    2. Map warps (staircases, door mats, cave entrances).
-    3. Overworld landmarks (Poké Centers, Poké Marts, Gyms, Oak's Lab, Cut trees, ledges).
-    4. Room boundaries (black void borders, obstacles).
+    Performs fast rule-based spatial analysis on GBA frames via ScreenAnalyzer.
     """
 
-    def __init__(self, target_width: int = 480, target_height: int = 320, debug_save_path: Optional[str] = "logs/last_poi_annotated.png"):
+    def __init__(
+        self,
+        target_width: int = 480,
+        target_height: int = 320,
+        debug_save_path: Optional[str] = "logs/last_poi_annotated.png"
+    ):
         self.target_width = target_width
         self.target_height = target_height
         self.debug_save_path = debug_save_path
+        self.analyzer = ScreenAnalyzer(
+            target_width=target_width,
+            target_height=target_height,
+            debug_poi_path=debug_save_path or "logs/last_poi_annotated.png"
+        )
 
     def analyze_frame(self, frame: Image.Image, current_area: str = "") -> Dict[str, Any]:
         """
-        Analyzes a captured frame and returns detected POIs and spatial guidelines.
-        Optionally saves an annotated debug screenshot showing what NumPy detected.
+        Analyzes a captured frame using ScreenAnalyzer and returns a dictionary of detected
+        player coordinates, room_type, void_borders, warps, landmarks, and spatial_guidance.
         """
-        resized = frame.resize((self.target_width, self.target_height))
+        scene = self.analyzer.analyze(frame, current_area_hint=current_area)
+        resized = frame.resize((self.target_width, self.target_height)).convert("RGB")
         arr = np.array(resized)
 
-        result: Dict[str, Any] = {
-            "player": self._detect_player(arr),
-            "room_type": self._detect_room_type(arr, current_area),
-            "void_borders": self._detect_void_borders(arr),
-            "warps": [],
-            "landmarks": [],
-            "spatial_guidance": []
-        }
-
-        # Area-specific POI detection
-        if result["room_type"] == "BEDROOM_2F":
-            self._analyze_bedroom(arr, result)
-        elif result["room_type"] == "LIVING_ROOM_1F":
-            self._analyze_living_room(arr, result)
-        elif result["room_type"] == "OVERWORLD":
-            self._analyze_overworld(arr, result)
-
-        # Save annotated debug visual if path specified
-        if self.debug_save_path:
-            self._save_debug_annotated_image(resized, result)
-
-        return result
-
-    def _save_debug_annotated_image(self, img: Image.Image, result: Dict[str, Any]):
-        """Saves an annotated image drawing bounding boxes around detected player and POIs."""
-        try:
-            from PIL import ImageDraw
-            annotated = img.copy()
-            draw = ImageDraw.Draw(annotated)
-
-            # Draw player
-            player = result.get("player", {})
-            if player.get("detected"):
-                px, py = player["x"], player["y"]
-                draw.rectangle([px - 14, py - 14, px + 14, py + 14], outline=(255, 50, 50), width=2)
-                draw.text((px - 20, max(0, py - 26)), f"Red ({player.get('facing', '?')})", fill=(255, 50, 50))
-
-            # Draw detected warps
-            for warp in result.get("warps", []):
-                wx, wy = warp.get("x", -1), warp.get("y", -1)
-                w_type = warp.get("type", "WARP")
-                if wx > 0 and wy > 0:
-                    draw.rectangle([wx - 12, wy - 12, wx + 12, wy + 12], outline=(255, 165, 0), width=2)
-                    draw.text((wx - 25, max(0, wy - 22)), w_type, fill=(255, 165, 0))
-
-            annotated.save(self.debug_save_path)
-        except Exception:
-            pass
-
-    def _detect_player(self, arr: np.ndarray) -> Dict[str, Any]:
-        """Locates Red's sprite via red cap and determines rough facing direction."""
-        cap_mask = (arr[:, :, 0] > 175) & (arr[:, :, 1] < 105) & (arr[:, :, 2] < 105)
-        y_idx, x_idx = np.where(cap_mask)
-
-        if len(y_idx) < 15:
-            return {"detected": False, "x": -1, "y": -1, "facing": "UNKNOWN"}
-
-        py = int(np.median(y_idx))
-        px = int(np.median(x_idx))
-
-        # Red sprite bounding box [py-15:py+25, px-15:px+15]
-        h, w, _ = arr.shape
-        y1, y2 = max(0, py - 10), min(h, py + 25)
-        x1, x2 = max(0, px - 15), min(w, px + 15)
-        sprite_patch = arr[y1:y2, x1:x2]
-
-        # Facing direction heuristic:
-        # Facing DOWN: face skin visible directly below cap (Y ~ py+5..12)
-        # Facing UP: dark hair/back of cap visible below cap, no skin
-        # Facing LEFT: red visor extends left
-        # Facing RIGHT: red visor extends right
-        face_skin = (
-            (sprite_patch[:, :, 0] > 220) &
-            (sprite_patch[:, :, 1] > 150) & (sprite_patch[:, :, 1] < 220) &
-            (sprite_patch[:, :, 2] > 100) & (sprite_patch[:, :, 2] < 170)
-        )
-        skin_count = int(np.sum(face_skin))
-
-        facing = "DOWN" if skin_count >= 15 else "OTHER"
+        warps: List[Dict[str, Any]] = []
+        landmarks: List[Dict[str, Any]] = []
+        for poi in scene.pois:
+            entry = {
+                "name": poi.name,
+                "type": poi.name,
+                "category": poi.category,
+                "col": poi.tile_col,
+                "row": poi.tile_row,
+                "interaction_tile": poi.interaction_tile,
+                "x": poi.pixel_x,
+                "y": poi.pixel_y,
+                "description": poi.description,
+            }
+            if poi.category == "WARP":
+                warps.append(entry)
+            else:
+                landmarks.append(entry)
 
         return {
-            "detected": True,
-            "x": px,
-            "y": py,
-            "facing": facing,
-            "skin_count": skin_count
+            "player": {
+                "detected": scene.player.detected,
+                "x": scene.player.pixel_x,
+                "y": scene.player.pixel_y,
+                "col": scene.player.tile_col,
+                "row": scene.player.tile_row,
+                "facing": scene.player.facing,
+            },
+            "room_type": scene.area_type,
+            "void_borders": self._detect_void_borders(arr),
+            "warps": warps,
+            "landmarks": landmarks,
+            "spatial_guidance": list(scene.spatial_notes),
         }
 
     def _detect_void_borders(self, arr: np.ndarray) -> Dict[str, bool]:
-        """Detects if borders of the screen are covered by the black void (< 20 RGB)."""
+        """Detects if borders of the screen are covered by the black void (< 25 RGB)."""
         h, w, _ = arr.shape
         return {
-            "south_void": bool(np.mean(arr[h - 40:, :, :] < 20) > 0.8),
-            "west_void": bool(np.mean(arr[:, :40, :] < 20) > 0.8),
-            "north_void": bool(np.mean(arr[:40, :, :] < 20) > 0.8),
-            "east_void": bool(np.mean(arr[:, w - 40:, :] < 20) > 0.8)
+            "south_void": bool(np.mean(arr[h - 40:, :, :] < 25) > 0.75),
+            "west_void": bool(np.mean(arr[:, :40, :] < 25) > 0.75),
+            "north_void": bool(np.mean(arr[:40, :, :] < 25) > 0.75),
+            "east_void": bool(np.mean(arr[:, w - 40:, :] < 25) > 0.75),
         }
-
-    def _detect_room_type(self, arr: np.ndarray, current_area: str) -> str:
-        """Determines the current environment type."""
-        voids = self._detect_void_borders(arr)
-        upper = arr[:160, :]
-
-        # Tatami floor (yellow-tan) + green rug
-        tatami = (upper[:, :, 0] > 140) & (upper[:, :, 1] > 120) & (upper[:, :, 2] < 110)
-        rug = (upper[:, :, 0] < 130) & (upper[:, :, 1] > 140) & (upper[:, :, 2] > 70)
-        is_bedroom = (np.mean(tatami) + np.mean(rug)) > 0.25 and (voids["south_void"] or "bedroom" in current_area.lower())
-
-        if is_bedroom:
-            return "BEDROOM_2F"
-
-        # Check for 1F living room (wood flooring, kitchen counters, table with Mom)
-        if "1f" in current_area.lower() or "living" in current_area.lower():
-            return "LIVING_ROOM_1F"
-
-        # Overworld outdoor grass / dirt / buildings
-        return "OVERWORLD"
-
-    def _analyze_bedroom(self, arr: np.ndarray, result: Dict[str, Any]):
-        """Detects bedroom features: staircase railing, landing mat, bed, south void."""
-        player = result["player"]
-        voids = result["void_borders"]
-
-        # 1. Orange staircase landing mat
-        mat_pixels = (
-            (arr[:, :, 0] > 200) &
-            (arr[:, :, 1] > 110) & (arr[:, :, 1] < 160) &
-            (arr[:, :, 2] > 60) & (arr[:, :, 2] < 120)
-        )
-        my, mx = np.where(mat_pixels & (np.arange(self.target_height)[:, None] < 100))
-        mat_visible = len(my) > 100
-
-        # 2. White staircase safety railing along top-right
-        rail_pixels = (arr[0:60, :, 0] > 240) & (arr[0:60, :, 1] > 240) & (arr[0:60, :, 2] > 240)
-        ry, rx = np.where(rail_pixels)
-        rail_visible = len(rx) > 100
-
-        notes: List[str] = []
-        notes.append("Red is in his 2F Bedroom.")
-
-        if voids["west_void"]:
-            notes.append("WEST VOID DEAD END: You are standing against the WEST WALL / BLACK VOID! DO NOT press LEFT! There is NO door to the left!")
-        if voids["south_void"]:
-            notes.append("SOUTH VOID DEAD END: The bottom of the screen is an impassable BLACK VOID dead end. There is NO door to the SOUTH! DO NOT press DOWN!")
-
-        if mat_visible:
-            mat_x = int(np.median(mx))
-            mat_y = int(np.median(my))
-            result["warps"].append({
-                "type": "STAIRS_LANDING_MAT",
-                "x": mat_x,
-                "y": mat_y,
-                "description": "Orange Welcome Mat for Stairs (Top-Right)"
-            })
-            notes.append(f"STAIRS ENTRANCE DETECTED: Orange landing mat is VISIBLE at (X={mat_x}, Y={mat_y}).")
-            if player["detected"]:
-                if player["x"] < mat_x - 16:
-                    notes.append("Step RIGHT until aligned with the orange mat, then walk UP onto it to descend downstairs!")
-                else:
-                    notes.append("Walk UP onto the orange mat to descend downstairs to 1F!")
-        elif rail_visible:
-            rightmost_rail_x = int(rx.max())
-            notes.append("STAIRCASE LOCATION: Top-right corner behind the white railing.")
-            notes.append("Railing blocks moving UP directly. The stairs entrance is immediately to the RIGHT of the railing.")
-            notes.append("Walk RIGHT (east) to scroll camera and reach the stairs entrance, then walk UP!")
-
-        notes.append("WARP RULE: In Pokémon, stairs transition AUTOMATICALLY when you step on them. There is NO door and NO need to press 'A'!")
-        result["spatial_guidance"] = notes
-
-    def _analyze_living_room(self, arr: np.ndarray, result: Dict[str, Any]):
-        """Detects 1F Mom's house features: front exit door mat, stairs in top-right."""
-        notes = [
-            "Red is on 1F (Mom's Living Room).",
-            "Front door to Pallet Town is at the BOTTOM-MIDDLE of the room on the red welcome mat.",
-            "Step DOWN onto the red mat to exit outside to Pallet Town automatically. DO NOT press A!",
-            "Talk to Mom (at dining table) if needed for healing."
-        ]
-        result["spatial_guidance"] = notes
-
-    def _analyze_overworld(self, arr: np.ndarray, result: Dict[str, Any]):
-        """Detects outdoor landmarks: Pokémon Centers (red roof), Poké Marts (blue roof), ledges, fences."""
-        notes = [
-            "Overworld Navigation: Buildings and doors have threshold mats.",
-            "Step directly onto entrance tiles/doors to enter buildings automatically. DO NOT press A to 'open' doors!",
-            "Ledges can only be hopped going SOUTH (down). You cannot walk UP through ledges."
-        ]
-        result["spatial_guidance"] = notes
 
     def format_poi_prompt(self, analysis: Dict[str, Any]) -> str:
         """Formats the analysis into a concise prompt block for the VLM."""
@@ -228,7 +91,10 @@ class POIDetector:
 
         player = analysis.get("player", {})
         if player.get("detected"):
-            lines.append(f"- Player Position: Red is at (X={player['x']}, Y={player['y']}) facing {player.get('facing', 'UNKNOWN')}.")
+            lines.append(
+                f"- Player Position: Red is at Tile (Col={player.get('col')}, Row={player.get('row')}) "
+                f"facing {player.get('facing', 'UNKNOWN')}."
+            )
 
         for note in analysis.get("spatial_guidance", []):
             lines.append(f"- {note}")

@@ -54,7 +54,7 @@ BIONIC_MODEL_ID = os.getenv("BIONIC_MODEL_ID", "default")
 
 # Turn Timing and Delays (in seconds)
 BUTTON_HOLD_DURATION = float(os.getenv("BUTTON_HOLD_DURATION", "0.05"))  # ~3 frames hold at 60fps (~16.7ms/frame)
-STEP_SETTLE_DELAY = float(os.getenv("STEP_SETTLE_DELAY", "0.20"))        # Paced delay between button presses within a multi-action batch
+STEP_SETTLE_DELAY = float(os.getenv("STEP_SETTLE_DELAY", "0.25"))        # 0.05s hold + 0.25s settle = 0.30s (> 16-frame 0.267s GBA walk cycle)
 TURN_SETTLE_DELAY = float(os.getenv("TURN_SETTLE_DELAY", "0.25"))        # Paced delay between turns (default: 0.25s)
 MAX_BATCH_ACTIONS = int(os.getenv("MAX_BATCH_ACTIONS", "6"))       # Maximum steps in a batch action sequence
 ANTI_STUCK_CONSECUTIVE_THRESHOLD = 6  # If screen unchanged for N turns, take recovery step

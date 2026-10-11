@@ -155,28 +155,66 @@ class GameLoop:
         scene = self.screen_analyzer.analyze(frame, current_area_hint=self.memory_manager.current_area)
         self.memory_manager.current_area = scene.area_description
 
+        notes_joined = " ".join(scene.spatial_notes)
+        if ("PIKACHU_FOLLOWING" in notes_joined or "STARTER_ALREADY_CLAIMED" in notes_joined) and not self.memory_manager.team:
+            self.memory_manager.apply_party_update("Received starter Pikachu Lv5")
+
         # Transition quests upon room movement
         current_prio = (self.memory_manager.priority_quest or "").lower()
         current_micro = (self.memory_manager.micro_step or "").lower()
+        has_starter = bool(self.memory_manager.team)
+
         if scene.area_type == "BEDROOM_2F" and "bedroom" not in current_prio:
             self.memory_manager.set_priority_quest("Leave Red's bedroom, go downstairs, and talk to Mom")
         elif scene.area_type == "LIVING_ROOM_1F":
-            if "bedroom" in current_prio or "go downstairs" in current_prio:
-                notes_text = " ".join(self.memory_manager.knowledge_notes).lower()
-                if "professor oak" in notes_text or "oak" in notes_text:
-                    self.memory_manager.set_priority_quest("Exit house through front door to Pallet Town, then visit Professor Oak's Lab")
-                    self.memory_manager.update_micro_step("Exit house through the front door mat at the bottom.")
-                else:
-                    self.memory_manager.set_priority_quest("Talk to Mom in the living room, then exit the house")
+            if not has_starter:
+                if "bedroom" in current_prio or "go downstairs" in current_prio:
+                    notes_text = " ".join(self.memory_manager.knowledge_notes).lower()
+                    if "professor oak" in notes_text or "oak" in notes_text:
+                        self.memory_manager.set_priority_quest("Exit house through front door to Pallet Town, then visit Professor Oak's Lab")
+                        self.memory_manager.update_micro_step("Exit house through the front door mat at the bottom.")
+                    else:
+                        self.memory_manager.set_priority_quest("Talk to Mom in the living room, then exit the house")
+            else:
+                for q in list(self.memory_manager.quests):
+                    if "starter" in q.lower() or "oak's lab" in q.lower():
+                        self.memory_manager.complete_quest(q)
+                if "viridian" not in current_prio and "route 1" not in current_prio:
+                    self.memory_manager.set_priority_quest("Say goodbye to Mom in the living room, then exit the house and travel NORTH along Route 1 to Viridian City")
         elif scene.area_type == "OVERWORLD":
             # Complete any indoor exit quest once outside in Pallet Town
             for q in list(self.memory_manager.quests):
                 if "exit house" in q.lower() or "living room" in q.lower() or "bedroom" in q.lower():
                     self.memory_manager.complete_quest(q)
-            if "bedroom" in current_prio or "living room" in current_prio or "exit house" in current_prio:
-                self.memory_manager.set_priority_quest("Visit Professor Oak's Lab in southeast Pallet Town to choose starter Pokémon")
-            if any(k in current_micro for k in ["front door", "exit house", "starter table", "downstairs", "bedroom"]):
-                self.memory_manager.update_micro_step("Walk southeast around the fence to Professor Oak's Lab entrance.")
+            if has_starter:
+                for q in list(self.memory_manager.quests):
+                    if "choose starter" in q.lower() or "starter pokémon" in q.lower():
+                        self.memory_manager.complete_quest(q)
+                if any(p.name == "EXITED_HOUSE_DOOR" for p in scene.pois):
+                    for q in list(self.memory_manager.quests):
+                        if "mom" in q.lower() or "goodbye" in q.lower():
+                            self.memory_manager.complete_quest(q)
+                    self.memory_manager.set_priority_quest("Leave Pallet Town via the NORTH exit and travel NORTH along Route 1 to Viridian City")
+                    self.memory_manager.update_micro_step("Walk NORTH out of Pallet Town and follow Route 1 NORTH to Viridian City.")
+            else:
+                if "bedroom" in current_prio or "living room" in current_prio or "exit house" in current_prio:
+                    self.memory_manager.set_priority_quest("Visit Professor Oak's Lab in southeast Pallet Town to choose starter Pokémon")
+                if any(k in current_micro for k in ["front door", "exit house", "starter table", "downstairs", "bedroom"]):
+                    self.memory_manager.update_micro_step("Walk southeast around the fence to Professor Oak's Lab entrance.")
+        elif scene.area_type == "OAKS_LAB":
+            if "LAB_TABLE_EMPTY (OAK NOT HERE)" in notes_joined:
+                self.memory_manager.set_priority_quest("Exit Professor Oak's Lab and walk NORTH into the tall grass exit of Pallet Town to trigger Professor Oak")
+                self.memory_manager.update_micro_step("Walk SOUTH to LAB_EXIT to leave the empty Lab, then walk NORTH to the tall grass exit of Pallet Town.")
+            elif "STARTER_ALREADY_CLAIMED" in notes_joined or has_starter:
+                for q in list(self.memory_manager.quests):
+                    if "choose" in q.lower() or "starter" in q.lower():
+                        self.memory_manager.complete_quest(q)
+                self.memory_manager.set_priority_quest("Exit Professor Oak's Lab, say goodbye to Mom in Mom's House, and travel NORTH on Route 1 to Viridian City")
+                self.memory_manager.update_micro_step("Walk SOUTH to LAB_EXIT to exit Professor Oak's Lab into Pallet Town.")
+            elif not has_starter:
+                self.memory_manager.set_priority_quest("Approach the Starter Table in Professor Oak's Lab and press A on the Poké Ball to claim Starter Pikachu")
+                if any(k in current_micro for k in ["southeast", "door", "entrance", "outside", "pallet", "tall grass"]):
+                    self.memory_manager.update_micro_step("Walk to STARTER_TABLE on the right and press A to claim Starter Pikachu.")
 
         if scene.is_battle or self.in_battle:
             self.in_battle = True
@@ -480,16 +518,20 @@ class GameLoop:
                 # 8. Execution Routing (BattleController vs MovementController vs Dialogue)
                 executed_actions: List[str] = []
 
-                if self._is_naming_screen(frame):
-                    print("[Naming Screen] Waiting for character name input.")
-                    executed_actions = ["WAIT"]
+                if self._is_naming_screen(frame) or scene.is_naming_screen:
+                    print("[Naming Screen] Confirming default name (B -> START -> A)...")
+                    for nb in ["B", "START", "A"]:
+                        self.input_controller.press_button(nb)
+                        time.sleep(0.25)
+                    executed_actions = ["B", "START", "A"]
                 elif scene.is_battle or intent == "BATTLE_ACTION":
                     print(f"[Battle Action] Executing {battle_action or 'FIGHT'} (Move Slot {move_slot or 1})...")
                     battle_res = self.battle_controller.execute_battle_strategy(
                         battle_action=battle_action,
                         move_slot=move_slot,
                         target_item=target_item,
-                        switch_target_slot=switch_target_slot
+                        switch_target_slot=switch_target_slot,
+                        frame=frame
                     )
                     executed_actions = battle_res.get("executed", [])
                 elif intent == "ADVANCE_DIALOGUE" or scene.is_dialogue:
@@ -500,6 +542,63 @@ class GameLoop:
                     time.sleep(self.turn_settle_delay)
                     executed_actions = ["WAIT"]
                 else:
+                    notes_joined = " ".join(scene.spatial_notes)
+                    active_goal_text = f"{self.memory_manager.priority_quest or ''} {self.memory_manager.micro_step or ''} {reasoning or ''}".lower()
+
+                    # If Professor Oak's Lab is visible on screen BEFORE we have a starter (and not heading to tall grass),
+                    # snap generic EXPLORE_* intents directly to ENTER_BUILDING -> OAKS_LAB so we never walk past it!
+                    if (
+                        scene.area_type == "OVERWORLD"
+                        and not self.memory_manager.team
+                        and "PIKACHU_FOLLOWING" not in notes_joined
+                        and "tall grass" not in active_goal_text
+                        and intent.startswith("EXPLORE_")
+                        and any(p.name == "OAKS_LAB" for p in scene.pois)
+                    ):
+                        if any(k in active_goal_text for k in ("oak", "lab", "starter")) or intent in ("EXPLORE_SOUTH", "EXPLORE_SOUTHEAST", "EXPLORE_EAST"):
+                            print(f"[POI Override] 'OAKS_LAB' is in frame! Overriding {intent} -> ENTER_BUILDING (Target=OAKS_LAB)")
+                            intent = "ENTER_BUILDING"
+                            target_poi = "OAKS_LAB"
+                    elif scene.area_type == "OAKS_LAB":
+                        if "LAB_TABLE_EMPTY (OAK NOT HERE)" in notes_joined or "STARTER_ALREADY_CLAIMED" in notes_joined:
+                            if intent != "EXIT_ROOM":
+                                print(f"[Lab Override] Lab table is empty / starter already claimed! Overriding {intent} ({target_poi}) -> EXIT_ROOM (Target=LAB_EXIT)")
+                                intent = "EXIT_ROOM"
+                                target_poi = "LAB_EXIT"
+                        elif not self.memory_manager.team and (
+                            intent in ("EXIT_ROOM", "ENTER_BUILDING", "TALK_TO_NPC")
+                            or (intent.startswith("EXPLORE_") and "NORTH" not in intent)
+                            or (target_poi and any(k in target_poi.upper() for k in ("EXIT", "LAB", "DOOR", "OAK")))
+                        ):
+                            print(f"[Lab Safeguard] Inside Oak's Lab with Starter Poké Ball on table! Overriding {intent} ({target_poi}) -> GO_TO_POI (Target=STARTER_TABLE)")
+                            intent = "GO_TO_POI"
+                            target_poi = "STARTER_TABLE"
+
+                    # Pre-Execution Stale-Scene Guard:
+                    # Verify the game did not finish a doorway/stairs warp or battle transition while the LLM was thinking!
+                    pre_frame, pre_thumb = self.screen_capture.capture_frame()
+                    if pre_frame is not None and pre_thumb is not None and float(pre_thumb.mean()) < 22.0:
+                        time.sleep(0.8)
+                        pre_frame, pre_thumb = self.screen_capture.capture_frame()
+                    if pre_frame is not None:
+                        live_scene = self.screen_analyzer.analyze(
+                            pre_frame,
+                            current_area_hint=self.memory_manager.current_area
+                        )
+                        if (
+                            live_scene.area_type != scene.area_type
+                            or live_scene.is_battle != scene.is_battle
+                            or (live_scene.is_dialogue and not scene.is_dialogue)
+                        ):
+                            print(
+                                f"[Stale Plan Guard] Scene changed during LLM call "
+                                f"({scene.area_type} -> {live_scene.area_type})! "
+                                f"Aborting stale {intent} plan and re-evaluating new room."
+                            )
+                            self.memory_manager.set_current_area(live_scene.area_description)
+                            self.previous_frame = pre_frame
+                            continue
+
                     # Deterministic Grid Pathfinding via MovementController!
                     print(f"[Motor Execution] Pathfinding Intent=[{intent}] Target=[{target_poi or 'Auto'}]...")
                     move_res = self.movement_controller.plan_and_execute(

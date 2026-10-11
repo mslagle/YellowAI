@@ -224,3 +224,4 @@ debug_captures/
 logs/
 mGBA-0.10.5-win64/
 state/
+tests/fixtures/recharged_yellow/battle_move_select.png
