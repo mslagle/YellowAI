@@ -1,14 +1,21 @@
 {
-  "turn": 8,
-  "last_action": "A",
+  "turn": 12,
+  "last_action": "WAIT",
   "latest_thought": "",
-  "priority_quest": "Leave Pallet Town via the NORTH exit and travel NORTH along Route 1 to Viridian City",
-  "active_quest": "Leave Pallet Town via the NORTH exit and travel NORTH along Route 1 to Viridian City",
+  "priority_quest": "Leave Red's bedroom, go downstairs, and talk to Mom",
+  "active_quest": "Leave Red's bedroom, go downstairs, and talk to Mom",
   "quests": [
-    "Explore Viridian City, heal at the Pok\u00e9mon Center, and Stock up at the Pok\u00e9 Mart",
-    "Leave Pallet Town via the NORTH exit and travel NORTH along Route 1 to Viridian City"
+    "Head NORTH via Route 2 and Viridian Forest to Pewter City Gym",
+    "Explore Viridian City and head north toward Route 2.",
+    "Explore route north toward Viridian City and Pewter City",
+    "Head north toward Viridian City and Pewter City.",
+    "Explore route north toward Viridian City and Pewter City.",
+    "Travel NORTH from Viridian City along Route 2 through Viridian Forest to defeat Brock at Pewter City Gym",
+    ">>> Travel NORTH from Viridian City along Route 2 through Viridian Forest to defeat Brock at Pewter City Gym <<<",
+    "Leave Pallet Town via the NORTH exit and travel NORTH along Route 1 to Viridian City",
+    "Leave Red's bedroom, go downstairs, and talk to Mom"
   ],
-  "current_area": "Turn-Based Pok\u00e9mon Battle",
+  "current_area": "Pallet Town - Red's Bedroom (2F)",
   "team": [
     {
       "species": "Pikachu",
@@ -21,23 +28,25 @@
     }
   ],
   "supplies": {
-    "poke_balls": 1,
+    "poke_balls": 0,
     "potions": 0,
     "town_map": false,
     "money": 3000
   },
   "badges": 0,
-  "micro_step": "Step into Oak's Lab to meet Professor Oak.",
-  "short_term_memory": "Red is standing outside Oak's Lab in Pallet Town. The immediate goal is to enter the lab to claim a starter Pok\u00e9mon.",
+  "micro_step": "Step west onto the stairs to go down to 1F.",
+  "short_term_memory": "Red is standing right next to the stairs mat on 2F.",
   "medium_term_memory": "Spoke with Mom downstairs and stepped outside into Pallet Town. Next objective is to visit Professor Oak's Lab in southeast Pallet Town.",
-  "long_term_memory": "Grand Goal: Defeat all 8 Kanto Gym Leaders, conquer the Elite Four, and become Pok\u00e9mon Champion.",
+  "long_term_memory": "Grand Goal: Defeat all 8 Kanto Gym Leaders, conquer the Elite Four, and become Pok\u00c3\u0192\u00c6\u2019\u00c3\u201a\u00c2\u00a9mon Champion.",
   "knowledge_notes": [
-    "Yellow Recharged: Pok\u00e9 Balls available immediately at Viridian Mart with no parcel required to unlock.",
-    "Dialogue: You were supposed to receive your first Pok\u00e9mon from Professor Oak",
-    "Dialogue: first Pok\u00e9mon from Professor Oak today!",
-    "Dialogue: ai, if you want to be a great trainer, you should be a",
-    "Dialogue: great trainer, you should be a little more responsible.",
-    "Dialogue: Go see Professor Oak. He might still have a Pok\u00e9mon for you."
+    "Dialogue: Go! PIKACHU!",
+    "Dialogue: What will PIKACHU do?",
+    "Dialogue: PIKACHU used ThunderShock!",
+    "Dialogue: Wild RATTATA fainted!,",
+    "Dialogue: PIKACHU gained 24 Exp. Points!",
+    "Dialogue: PIDGEY Lv4",
+    "Dialogue: Wild PIDGEY fainted!",
+    "Dialogue: PIKACHU gained 31 Exp. Points!"
   ],
-  "timestamp": 1791681931.6373026
+  "timestamp": 1791736960.2899055
 }

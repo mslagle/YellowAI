@@ -106,11 +106,19 @@ class InputController:
             time.sleep(0.06)
             in_focus = user32.GetForegroundWindow() == target
             if in_focus:
-                print(f"[InputController] Automatically grabbed focus of mGBA (HWND: {target})")
+                try:
+                    from core.logger import log_file_only
+                    log_file_only(f"[InputController] Automatically grabbed focus of mGBA (HWND: {target})")
+                except Exception:
+                    pass
             return in_focus
 
         except Exception as e:
-            print(f"[InputController] Error grabbing focus: {e}")
+            try:
+                from core.logger import log_file_only
+                log_file_only(f"[InputController] Error grabbing focus: {e}")
+            except Exception:
+                pass
             return False
 
     def focus_hwnd(self, hwnd: int) -> bool:

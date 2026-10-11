@@ -558,6 +558,20 @@ class MovementController:
                 "status": "CLOSED_TRAINER_CARD"
             }
 
+        if scene.area_type == "BAG_MENU":
+            if self.input_controller:
+                self.input_controller.press_button("B")
+            return {
+                "success": True,
+                "target": "CLOSE_BAG_MENU",
+                "path_length": 0,
+                "planned_buttons": ["B"],
+                "executed_buttons": ["B"] if self.input_controller else [],
+                "interrupted": False,
+                "interrupt_reason": None,
+                "status": "CLOSED_BAG_MENU"
+            }
+
         if intent == "ADVANCE_DIALOGUE" or scene.area_type == "TITLE_SCREEN":
             if self.input_controller:
                 self.input_controller.press_button("A")

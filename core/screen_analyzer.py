@@ -54,9 +54,49 @@ CELL_NPC = 6
 CELL_WARP = 7
 
 
+# Native GBA sign templates (2x downsampled luminance, normalized for zero-mean unit-variance)
+# Captures gray metal town/route signs and wooden notice signs invariant to Day/Dusk/Night lighting
+_TPL_GRAY_INT = np.array([
+    [82, 82, 165, 165, 82, 82, 82, 82, 82, 82, 165, 165, 82, 82],
+    [250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250],
+    [250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250, 250],
+    [189, 189, 189, 189, 189, 189, 189, 189, 189, 189, 189, 189, 189, 189],
+    [189, 121, 121, 121, 121, 189, 189, 189, 189, 121, 121, 121, 121, 189],
+    [189, 189, 121, 189, 189, 189, 189, 143, 189, 189, 189, 121, 189, 189],
+    [189, 143, 121, 189, 121, 189, 121, 121, 189, 121, 189, 121, 143, 189],
+    [189, 189, 143, 189, 143, 189, 189, 143, 189, 143, 189, 143, 189, 189],
+    [189, 189, 189, 189, 189, 189, 189, 189, 189, 189, 189, 189, 189, 189],
+    [126, 126, 165, 165, 165, 126, 126, 126, 126, 126, 165, 165, 165, 126],
+    [189, 189, 189, 189, 189, 189, 189, 189, 189, 189, 189, 189, 189, 189],
+    [82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82, 82]
+], dtype=float)
+
+_TPL_WOOD_INT = np.array([
+    [162, 71, 71, 71, 71, 71, 217, 217, 71, 71, 71, 71, 71, 162],
+    [90, 217, 217, 217, 217, 159, 217, 217, 159, 217, 217, 217, 217, 71],
+    [90, 217, 217, 217, 217, 217, 159, 159, 217, 217, 217, 217, 217, 71],
+    [90, 159, 159, 159, 159, 159, 159, 159, 159, 159, 159, 159, 159, 71],
+    [90, 159, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 159, 71],
+    [90, 159, 90, 195, 90, 195, 195, 195, 195, 90, 195, 90, 159, 71],
+    [90, 159, 90, 90, 195, 90, 159, 159, 90, 195, 90, 90, 159, 71],
+    [90, 159, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 159, 71],
+    [90, 159, 195, 159, 159, 195, 159, 195, 159, 159, 159, 195, 159, 71],
+    [90, 159, 195, 195, 195, 195, 195, 195, 195, 195, 195, 195, 159, 71],
+    [162, 71, 71, 71, 71, 71, 71, 71, 71, 71, 71, 71, 71, 162]
+], dtype=float)
+
+def _norm_pattern(arr_2d: np.ndarray) -> np.ndarray:
+    flat = arr_2d.flatten().astype(float)
+    s = float(flat.std())
+    return (flat - float(flat.mean())) / s if s > 1e-5 else np.zeros_like(flat)
+
+TPL_GRAY_NORM = _norm_pattern(_TPL_GRAY_INT)
+TPL_WOOD_NORM = _norm_pattern(_TPL_WOOD_INT)
+
+
 @dataclass
 class POI:
-    name: str                       # e.g. "STAIRS_DOWN", "FRONT_DOOR", "MOM", "PC"
+    name: str                       # e.g. "STAIRS_DOWN", "FRONT_DOOR", "MOM", "PC", "SIGN"
     category: str                   # "WARP", "NPC", "OBJECT", "COUNTER"
     tile_col: int                   # 0 to 14
     tile_row: int                   # 0 to 9
@@ -88,6 +128,8 @@ class SceneAnalysis:
     is_battle: bool = False
     is_dialogue: bool = False
     is_naming_screen: bool = False
+    is_bag_menu: bool = False
+    bag_items_empty: bool = False
     dialogue_crop: Optional[Image.Image] = None
     dialogue_has_arrow: bool = False
 
@@ -125,13 +167,15 @@ class ScreenAnalyzer:
             is_oak_intro = False
 
         is_shop_menu = self._is_shop_menu(arr) and not is_battle and not is_naming and not is_title_or_menu
-        is_start_menu = self._is_start_menu(arr) and not is_battle and not is_naming and not is_title_or_menu and not is_shop_menu
+        is_bag_menu = self._is_bag_menu(arr) and not is_battle and not is_naming and not is_title_or_menu and not is_shop_menu
+        is_start_menu = self._is_start_menu(arr) and not is_battle and not is_naming and not is_title_or_menu and not is_shop_menu and not is_bag_menu
         is_dialogue = (
             (self._is_dialogue_active(arr) or is_oak_intro)
             and not is_battle
             and not is_naming
             and not is_trainer_card
             and not is_shop_menu
+            and not is_bag_menu
             and not (is_title_or_menu and not is_oak_intro)
         )
 
@@ -161,12 +205,13 @@ class ScreenAnalyzer:
             is_title_or_menu=is_title_or_menu,
             title_desc=title_desc,
             is_shop_menu=is_shop_menu,
+            is_bag_menu=is_bag_menu,
             is_start_menu=is_start_menu,
             is_dialogue=is_dialogue
         )
 
-        # 3. Player localization (skip on non-map screens like Battle, Naming, Title, Trainer Card)
-        if area_type in ("BATTLE", "NAMING_SCREEN", "TITLE_SCREEN", "TRAINER_CARD"):
+        # 3. Player localization (skip on non-map screens like Battle, Naming, Title, Trainer Card, Bag)
+        if area_type in ("BATTLE", "NAMING_SCREEN", "TITLE_SCREEN", "TRAINER_CARD", "BAG_MENU"):
             player = PlayerState(detected=False)
         else:
             player = self._detect_player(arr)
@@ -205,6 +250,15 @@ class ScreenAnalyzer:
             area_desc = "Player Trainer Card Screen"
             notes.append("Trainer Card is open. Press B or A ('ADVANCE_DIALOGUE') to close and return.")
             available_intents = ["ADVANCE_DIALOGUE", "EXIT_ROOM", "WAIT"]
+        elif is_bag_menu:
+            area_type = "BAG_MENU"
+            area_desc = "Player Bag Inventory Screen"
+            bag_empty = self._is_bag_empty(arr)
+            if bag_empty:
+                notes.append("Player Bag is open, but this item pocket is completely EMPTY (0 items / only 'Cancel'). You have 0 usable items or Poké Balls here! Press B ('EXIT_ROOM') to close and return.")
+            else:
+                notes.append("Player Bag is open. Press B ('EXIT_ROOM') to close and return.")
+            available_intents = ["EXIT_ROOM", "ADVANCE_DIALOGUE", "WAIT"]
         elif is_title_or_menu:
             area_type = "TITLE_SCREEN"
             notes.append(f"{area_desc}: Choose 'ADVANCE_DIALOGUE' (Press A) to proceed.")
@@ -221,6 +275,8 @@ class ScreenAnalyzer:
                 self._analyze_pokecenter(arr, collision_grid, player, pois, notes, available_intents)
             elif area_type == "POKEMART":
                 self._analyze_pokemart(arr, collision_grid, player, pois, notes, available_intents, is_dialogue=is_dialogue, is_shop_menu=is_shop_menu)
+            elif area_type == "GATEHOUSE":
+                self._analyze_gatehouse(arr, collision_grid, player, pois, notes, available_intents, is_dialogue=is_dialogue)
             else:
                 self._analyze_overworld(arr, collision_grid, player, pois, notes, available_intents, is_dialogue=is_dialogue)
 
@@ -255,6 +311,8 @@ class ScreenAnalyzer:
             is_battle=is_battle,
             is_dialogue=is_dialogue,
             is_naming_screen=is_naming,
+            is_bag_menu=is_bag_menu,
+            bag_items_empty=(is_bag_menu and self._is_bag_empty(arr)),
             dialogue_crop=dialogue_crop,
             dialogue_has_arrow=dialogue_has_arrow
         )
@@ -283,11 +341,30 @@ class ScreenAnalyzer:
             r = arr[:, :, 0].astype(int)
             g = arr[:, :, 1].astype(int)
             b = arr[:, :, 2].astype(int)
-            # Recharged Yellow / Gen 3 Battle HUD cream card fill: RGB ~ [248, 248, 216]
+            # Battle screen never has black room void border (< 20 RGB) across bottom edge
+            bot_void = float(np.mean((r[280:, :] < 20) & (g[280:, :] < 20) & (b[280:, :] < 20)))
+            if bot_void > 0.40:
+                return False
+
+            # Recharged Yellow / Gen 3 Battle HUD cream card fill: RGB ~ [248, 248, 216] (Daytime)
             cream_mask = (r > 230) & (g > 230) & (b >= 190) & (b <= 232) & ((r - b) >= 12) & ((g - b) >= 12)
             ehud_cream = float(np.mean(cream_mask[28:82, 24:212]))
             phud_cream = float(np.mean(cream_mask[148:212, 268:455]))
             if ehud_cream > 0.25 and phud_cream > 0.25:
+                return True
+
+            # Night Battle HUD cards (Recharged Yellow RTC night palette: Enemy card dark gray, Player card muted tan/olive)
+            ehud_night = float(np.mean(
+                (r[28:82, 24:212] > 20) & (r[28:82, 24:212] < 70) &
+                (g[28:82, 24:212] > 20) & (g[28:82, 24:212] < 70) &
+                (b[28:82, 24:212] > 20) & (b[28:82, 24:212] < 70)
+            ))
+            phud_night = float(np.mean(
+                (r[148:212, 268:455] > 75) & (r[148:212, 268:455] < 145) &
+                (g[148:212, 268:455] > 75) & (g[148:212, 268:455] < 145) &
+                (b[148:212, 268:455] > 55) & (b[148:212, 268:455] < 125)
+            ))
+            if ehud_night > 0.15 and phud_night > 0.35:
                 return True
 
             # Orange/ochre battle narrative banner at bottom (y=235..310, RGB ~ [189, 115, 33])
@@ -305,7 +382,7 @@ class ScreenAnalyzer:
             is_dark_banner = np.mean(bottom_box[:, :, 0] < 60) > 0.6 and np.mean(bottom_box[:, :, 2] > 60) > 0.3
             hp_green = (g > 200) & (r < 150) & (b < 150)
             has_hp = np.sum(hp_green) > 50
-            return bool(is_dark_banner and (has_hp or ehud_cream > 0.20))
+            return bool(is_dark_banner and (has_hp or ehud_cream > 0.20 or ehud_night > 0.15))
         except Exception:
             return False
 
@@ -355,6 +432,33 @@ class ScreenAnalyzer:
             return False, "", False
         except Exception:
             return False, "", False
+
+    def _is_bag_menu(self, arr: np.ndarray) -> bool:
+        """Detects in-game Bag screen (backpack on left, item list on right, blue bottom banner)."""
+        try:
+            r = arr[:, :, 0].astype(int)
+            g = arr[:, :, 1].astype(int)
+            b = arr[:, :, 2].astype(int)
+            item_list_white = float(np.mean((r[15:215, 170:470] > 220) & (g[15:215, 170:470] > 220) & (b[15:215, 170:470] > 160)))
+            bot_blue = float(np.mean((r[225:315, 10:470] < 60) & (g[225:315, 10:470] > 80) & (b[225:315, 10:470] > 140)))
+            backpack_bg_teal = float(np.mean((r[60:215, 10:160] < 120) & (g[60:215, 10:160] > 150) & (b[60:215, 10:160] > 140)))
+            return bool(item_list_white > 0.60 and bot_blue > 0.50 and backpack_bg_teal > 0.35)
+        except Exception:
+            return False
+
+    def _is_bag_empty(self, arr: np.ndarray) -> bool:
+        """
+        Detects whether the currently opened bag pocket is completely empty
+        (Slot 1 is 'Cancel' or no item names exist in any slot).
+        """
+        try:
+            # First slot text area: x in [195..280], y in [20..50]
+            # Slots 2-4 text area: x in [195..400], y in [50..170]
+            text_slots_other = np.sum((arr[50:170, 195:400, 0] <= 110) & (arr[50:170, 195:400, 1] <= 110) & (arr[50:170, 195:400, 2] <= 110))
+            # If slots 2-4 have 0 text pixels, slot 1 has text ('Cancel'), this pocket has 0 usable items!
+            return bool(text_slots_other < 25)
+        except Exception:
+            return False
 
     def _is_shop_menu(self, arr: np.ndarray) -> bool:
         """Detects Poké Mart Buy/Sell item selection menu."""
@@ -406,6 +510,7 @@ class ScreenAnalyzer:
         is_title_or_menu: bool = False,
         title_desc: str = "",
         is_shop_menu: bool = False,
+        is_bag_menu: bool = False,
         is_start_menu: bool = False,
         is_dialogue: bool = False
     ) -> Tuple[str, str]:
@@ -416,6 +521,8 @@ class ScreenAnalyzer:
             return "NAMING_SCREEN", "Character Naming Screen"
         if is_trainer_card:
             return "TRAINER_CARD", "Player Trainer Card Screen"
+        if is_bag_menu:
+            return "BAG_MENU", "Player Bag Inventory Screen"
         if is_title_or_menu:
             return "TITLE_SCREEN", title_desc or "Title / Main Menu Screen"
         if is_shop_menu:
@@ -472,11 +579,19 @@ class ScreenAnalyzer:
         if (lab_white > 0.22 or lab_white_nv > 0.24 or (lab_dimmed > 0.20 and is_start_menu)) and tatami < 0.08 and total_void > 0.08:
             return "OAKS_LAB", "Pallet Town - Professor Oak's Research Lab"
 
-        # 4. Poké Center: White/Pink floor, central healing counter with red Poké Ball emblem
+        # 4. Poké Center: Healing counter at north with red panel (counter_red > 400), yellow checkered or pink floor, and left escalator
+        counter_red = np.sum((r_all[:70, :] > 180) & (g_all[:70, :] < 100) & (b_all[:70, :] < 100))
         center_floor = (r_all > 220) & (g_all > 210) & (b_all > 210)
+        center_yellow_grid = (r_all[60:240, :] > 200) & (g_all[60:240, :] > 190) & (b_all[60:240, :] > 130) & (b_all[60:240, :] < 190)
         red_counter_emblem = (r_all[60:140, :] > 190) & (g_all[60:140, :] < 80) & (b_all[60:140, :] < 80)
-        if np.mean(center_floor) > 0.25 and np.sum(red_counter_emblem) > 150 and tatami < 0.08 and lab_white < 0.35:
+        if (counter_red > 400 or (np.mean(center_floor) > 0.25 and np.sum(red_counter_emblem) > 150)) and tatami < 0.08 and lab_white < 0.35 and (total_void > 0.05 or is_dialogue or north_void):
             return "POKECENTER", "Pokémon Center - Free Healing Station"
+
+        # 4b. Gatehouse / Border Passage: Vertical blue runner carpet on left, gray turnstiles/pillars at North, red mat at South, void on East
+        gatehouse_blue = float(np.mean((b_all[:, :100] > 130) & (b_all[:, :100] > r_all[:, :100] + 30)))
+        gatehouse_void_east = float(np.mean(arr[:, 260:] < 25))
+        if gatehouse_blue > 0.20 and gatehouse_void_east > 0.60:
+            return "GATEHOUSE", "Route 2 / Viridian Forest Gatehouse"
 
         # 5. House Indoor Rooms (Tatami wooden floor + green rug, Daytime + Nighttime): Distinguish 1F Living Room vs 2F Bedroom
         if tatami >= 0.12 or (tatami_score >= 0.18 and total_void >= 0.15):
@@ -1198,58 +1313,202 @@ class ScreenAnalyzer:
         notes: List[str],
         available_intents: List[str]
     ):
-        """Analyzes Pokémon Center interior."""
+        """Analyzes Pokémon Center interior dynamically across camera scroll positions."""
+        r_all = arr[:, :, 0].astype(int)
+        g_all = arr[:, :, 1].astype(int)
+        b_all = arr[:, :, 2].astype(int)
+
+        # 1. Detect red counter position at north
+        counter_rows = [
+            r for r in range(4)
+            if np.sum((r_all[r*32:(r+1)*32, :] > 180) & (g_all[r*32:(r+1)*32, :] < 100) & (b_all[r*32:(r+1)*32, :] < 100)) > 200
+        ]
+        counter_r = min(counter_rows) if counter_rows else 0
+        nurse_joy_row = counter_r
+        nurse_joy_interact_row = counter_r + 1
+
+        # 2. Detect south exit mat (red welcome mat before room void)
+        exit_col, exit_row = 7, 5
+        best_mat_score = 0.0
+        for r in range(5, GRID_ROWS):
+            for c in range(5, 10):
+                if player.detected and (c, r) == (player.tile_col, player.tile_row):
+                    continue
+                x1, y1, x2, y2 = tile_bounds(c, r)
+                patch = arr[y1:y2, x1:x2]
+                pr = patch[:, :, 0].astype(int)
+                pg = patch[:, :, 1].astype(int)
+                pb = patch[:, :, 2].astype(int)
+                is_red = float(np.mean((pr > 150) & (pr > pg + 40) & (pr > pb + 40)))
+                if is_red > best_mat_score and is_red > 0.12:
+                    best_mat_score = is_red
+                    exit_col, exit_row = c, r
+
+        # 3. Mark grid: counter obstacles, void below exit, left escalator, right PC table
+        for c in range(4, 11):
+            if 0 <= nurse_joy_row < GRID_ROWS:
+                grid[nurse_joy_row, c] = CELL_COUNTER
+
+        # Escalator on the west wall (Cols 0..1, Rows counter_r+1..counter_r+3)
+        for r in range(nurse_joy_row + 1, min(GRID_ROWS, nurse_joy_row + 4)):
+            for c in (0, 1):
+                if grid[r, c] == CELL_WALKABLE:
+                    grid[r, c] = CELL_OBSTACLE
+
+        # PC terminal on east wall at (12, nurse_joy_row + 2)
+        pc_col = 12
+        pc_row = min(GRID_ROWS - 1, nurse_joy_row + 2)
+        grid[pc_row, pc_col] = CELL_OBSTACLE
+        grid[pc_row, pc_col - 1] = CELL_OBSTACLE
+
+        # Void below exit
+        for r in range(exit_row + 1, GRID_ROWS):
+            for c in range(GRID_COLS):
+                grid[r, c] = CELL_VOID
+
+        # Keep player's tile walkable
+        if player.detected and 0 <= player.tile_row < GRID_ROWS and 0 <= player.tile_col < GRID_COLS:
+            grid[player.tile_row, player.tile_col] = CELL_WALKABLE
+
+        # Mark exit warp
+        grid[exit_row, exit_col] = CELL_WARP
+
         # Nurse Joy at counter top-center
-        jpx, jpy = tile_to_pixel_center(7, 2)
+        jpx, jpy = tile_to_pixel_center(7, nurse_joy_row)
         pois.append(POI(
             name="NURSE_JOY",
             category="NPC",
             tile_col=7,
-            tile_row=2,
+            tile_row=nurse_joy_row,
             pixel_x=jpx,
             pixel_y=jpy,
-            description="Nurse Joy (Free party healing)",
-            interaction_tile=(7, 3)
+            description="Nurse Joy (Free party healing at counter)",
+            interaction_tile=(7, nurse_joy_interact_row)
         ))
 
         # PC terminal on right wall
-        pcpx, pcpy = tile_to_pixel_center(12, 2)
+        pcpx, pcpy = tile_to_pixel_center(pc_col, pc_row)
         pois.append(POI(
             name="PC",
             category="OBJECT",
-            tile_col=12,
-            tile_row=2,
+            tile_col=pc_col,
+            tile_row=pc_row,
             pixel_x=pcpx,
             pixel_y=pcpy,
             description="Pokémon Storage System PC",
-            interaction_tile=(12, 3)
+            interaction_tile=(pc_col, pc_row + 1 if pc_row + 1 < exit_row else pc_row - 1)
         ))
 
         # Exit door at south center
-        epx, epy = tile_to_pixel_center(7, 8)
+        epx, epy = tile_to_pixel_center(exit_col, exit_row)
+        exit_interact = (exit_col, min(GRID_ROWS - 1, exit_row + 1)) if (player.detected and (player.tile_col, player.tile_row) == (exit_col, exit_row) and exit_row + 1 < GRID_ROWS) else (exit_col, exit_row)
         pois.append(POI(
             name="CENTER_EXIT",
             category="WARP",
-            tile_col=7,
-            tile_row=8,
+            tile_col=exit_col,
+            tile_row=exit_row,
             pixel_x=epx,
             pixel_y=epy,
             description="Exit door back to town",
-            interaction_tile=(7, 8)
+            interaction_tile=exit_interact
         ))
-
-        # Counter obstacle across rows 2-3
-        for c in range(4, 11):
-            grid[2, c] = CELL_COUNTER
-        grid[8, 7] = CELL_WARP
 
         notes.extend([
             "Red is inside the Pokémon Center.",
-            "HEALING: Walk to Nurse Joy counter at Col 7, Row 3 to heal your party.",
-            "EXIT: South door at Col 7, Row 8."
+            f"HEALING: Walk to Nurse Joy counter at Col 7, Row {nurse_joy_interact_row} to heal your party.",
+            f"EXIT: South door at Col {exit_col}, Row {exit_row}."
         ])
 
         available_intents.extend(["TALK_TO_NPC", "EXIT_ROOM", "GO_TO_POI", "WAIT"])
+
+    def _analyze_gatehouse(
+        self,
+        arr: np.ndarray,
+        grid: np.ndarray,
+        player: PlayerState,
+        pois: List[POI],
+        notes: List[str],
+        available_intents: List[str],
+        is_dialogue: bool = False
+    ):
+        """Analyzes Route / Forest Gatehouse interior: north doorway, south doorway, guard NPC, tables/chairs."""
+        h, w, _ = arr.shape
+        self._populate_void_cells(arr, grid)
+
+        # Mark all void cells and border walls
+        for r in range(GRID_ROWS):
+            for c in range(GRID_COLS):
+                if grid[r, c] == CELL_VOID:
+                    continue
+                x1, y1, x2, y2 = tile_bounds(c, r)
+                patch = arr[max(0, y1):min(h, y2), max(0, x1):min(w, x2)]
+                if patch.size > 0:
+                    pr, pg, pb = patch[:, :, 0].astype(int), patch[:, :, 1].astype(int), patch[:, :, 2].astype(int)
+                    # Tables & chairs in gatehouse center: white/metallic desk surfaces
+                    is_table = float(np.mean((pr > 210) & (pg > 210) & (pb > 210))) > 0.20
+                    is_chair = float(np.mean((pb > 170) & (pb > pr + 40) & (pr < 130))) > 0.15
+                    if is_table or is_chair:
+                        if not (player.detected and (c, r) == (player.tile_col, player.tile_row)):
+                            grid[r, c] = CELL_OBSTACLE
+                    else:
+                        grid[r, c] = CELL_WALKABLE
+
+        # Guard / Border Patrol Officer NPC (e.g., Col 4, Row 3)
+        guard_col, guard_row = 4, 3
+        if player.detected and (guard_col, guard_row) != (player.tile_col, player.tile_row):
+            grid[guard_row, guard_col] = CELL_OBSTACLE
+        gpx, gpy = tile_to_pixel_center(guard_col, guard_row)
+        pois.append(POI(
+            name="GUARD",
+            category="NPC",
+            tile_col=guard_col,
+            tile_row=guard_row,
+            pixel_x=gpx,
+            pixel_y=gpy,
+            description="Gatehouse Guard",
+            interaction_tile=(guard_col, guard_row + 1)
+        ))
+
+        # North Entrance/Exit (to Viridian Forest / Pewter City) at Col 3..4, Row 0
+        north_door_col = 3
+        north_door_row = 0
+        grid[north_door_row, north_door_col] = CELL_WARP
+        grid[north_door_row, north_door_col + 1] = CELL_WARP
+        npx, npy = tile_to_pixel_center(north_door_col, north_door_row)
+        pois.insert(0, POI(
+            name="NORTH_GATE",
+            category="WARP",
+            tile_col=north_door_col,
+            tile_row=north_door_row,
+            pixel_x=npx,
+            pixel_y=npy,
+            description="North Exit doorway leading into Viridian Forest (Pewter City direction)",
+            interaction_tile=(north_door_col, north_door_row)
+        ))
+
+        # South Entrance/Exit (back to Route 2 / Viridian City) at Col 1..2, Row 8
+        south_door_col = 1
+        south_door_row = 8
+        grid[south_door_row, south_door_col] = CELL_WARP
+        spx, spy = tile_to_pixel_center(south_door_col, south_door_row)
+        pois.append(POI(
+            name="SOUTH_GATE",
+            category="WARP",
+            tile_col=south_door_col,
+            tile_row=south_door_row,
+            pixel_x=spx,
+            pixel_y=spy,
+            description="South Exit doorway leading back to Route 2 / Viridian City",
+            interaction_tile=(south_door_col, south_door_row)
+        ))
+
+        notes.extend([
+            "Red is inside the Route 2 / Viridian Forest Gatehouse.",
+            "PRIMARY OBJECTIVE: Walk NORTH through NORTH_GATE at (3, 0) to exit into Viridian Forest towards Pewter City!",
+            "NAVIGATION: Pathfind around the tables and step through NORTH_GATE at Col 3, Row 0."
+        ])
+
+        available_intents.extend(["EXIT_ROOM", "TALK_TO_NPC", "GO_TO_POI", "EXPLORE_NORTH", "WAIT"])
 
     def _analyze_pokemart(
         self,
@@ -1421,14 +1680,21 @@ class ScreenAnalyzer:
                 if not is_tall_grass and tree_green > 0.35 and std_val >= 16.5 and lawn_backdrop < 0.25:
                     tree_mask_grid[r, c] = True
 
-                # A) Walkable flat ground / dirt road / short lawn grass / dirt-to-grass border (which has no dark shadows min >= 75)
+                # A) Walkable flat ground / dirt road / short lawn grass / cobblestone road border (min_channel >= 60, low color saturation)
                 roof_px = float(np.mean((pr > pg + 25) & (pr > pb + 15)))
-                water_px = float(np.mean((pb > pg + 25) & (pb > pr + 30)))
+                water_px = float(np.mean((pb > pg + 25) & (pb > pr + 30) & (pr < 70)))
+                fence_px = float(np.mean((pr > pg + 15) & (pr > pb + 15) & (pr > 75) & (pr < 165)))
                 min_channel = int(patch.min())
+                gray_road = (
+                    min_channel >= 60
+                    and std_val < 38.0
+                    and float(np.mean((np.abs(pr - pg) < 32) & (np.abs(pg - pb) < 28))) > 0.65
+                )
                 is_flat_ground = (
-                    (std_val < 16.5 or (std_val < 26.0 and min_channel >= 50 and all_green > 0.25))
+                    (std_val < 16.5 or (std_val < 26.0 and min_channel >= 50 and all_green > 0.25) or gray_road)
                     and roof_px < 0.35
                     and water_px < 0.45
+                    and fence_px < 0.20
                 )
 
                 # B) Walkable flowers (lawn grass background + bright red flower petals, never brown ledges)
@@ -1783,9 +2049,115 @@ class ScreenAnalyzer:
                     "OVERSHOT OAK'S LAB: Red walked too far South past Professor Oak's Lab to the Pallet Town Pond! Oak's Lab is NORTH/NORTHEAST behind the fence at (12, 0). Choose 'ENTER_BUILDING' with target 'OAKS_LAB' or 'EXPLORE_NORTH'!"
                 )
 
+        # 2c-2. Route 2 / Viridian Forest Gatehouse Entrance:
+        # Detect gray stone steps and doorway leading North into the Gatehouse (e.g., Cols 1..4 at Row 0)
+        if not found_target_warp and not is_dialogue:
+            step_cols = []
+            for c in range(GRID_COLS):
+                sp = arr[0:32, c * TILE_SIZE:(c + 1) * TILE_SIZE]
+                if sp.size > 0:
+                    chan_std = float(np.std(sp, axis=2).mean())
+                    mean_val = float(sp.mean())
+                    if chan_std < 20.0 and mean_val > 150.0:
+                        step_cols.append(c)
+            if len(step_cols) >= 3 and 0 in step_cols or 1 in step_cols:
+                # Doorway is at the center of the steps (e.g., col 2 or 3)
+                door_c = (step_cols[0] + step_cols[-1]) // 2
+                grid[0, door_c] = CELL_WARP
+                # Mark neighboring step tiles as walkable or warp so pathfinder can easily step onto the stairs
+                for sc in step_cols:
+                    if grid[0, sc] == CELL_OBSTACLE:
+                        grid[0, sc] = CELL_WALKABLE
+                grid[0, door_c] = CELL_WARP
+                dpx, dpy = tile_to_pixel_center(door_c, 0)
+                pois.insert(0, POI(
+                    name="GATEHOUSE_DOOR",
+                    category="WARP",
+                    tile_col=door_c,
+                    tile_row=0,
+                    pixel_x=dpx,
+                    pixel_y=dpy,
+                    description=f"Route 2 Gatehouse / Viridian Forest Entrance Door (Walk onto ({door_c}, 0) and step UP to enter)",
+                    interaction_tile=(door_c, 0)
+                ))
+                found_target_warp = True
+                notes.append(
+                    f"ROUTE 2 GATEHOUSE ENTRANCE: The Gatehouse entrance leading into Viridian Forest is visible at ({door_c}, 0). Choose 'ENTER_BUILDING' with target 'GATEHOUSE_DOOR' or 'EXPLORE_NORTH' to proceed into Viridian Forest towards Pewter City!"
+                )
+
         if just_exited_house and not found_target_warp:
             notes.append(
                 "JUST EXITED BUILDING: If heading to Professor Oak's Lab in Southeast Pallet Town, choose 'EXPLORE_SOUTHEAST' or 'EXPLORE_SOUTH' to walk around the house and fence."
+            )
+
+        # 2d. Detect Overworld Signs (Gray metal town/route signs and wooden notice signs)
+        detected_signs = []
+        if not is_dialogue:
+            arr_lum = arr.mean(axis=2)
+            for r in range(GRID_ROWS):
+                for c in range(GRID_COLS):
+                    if player.detected and (c, r) == (player.tile_col, player.tile_row):
+                        continue
+                    x1, y1, x2, y2 = tile_bounds(c, r)
+                    matched_sign = None
+                    # Full tile check (rows 0..8) or bottom edge slice (row 9)
+                    if r < 9:
+                        for dy in (0, -10, -14, 2):
+                            yy1, yy2 = y1 + dy, y2 + dy
+                            if yy1 < 0 or yy2 > h:
+                                continue
+                            sg = arr_lum[yy1+2:yy2-6:2, x1+2:x2-2:2]
+                            if sg.shape == (12, 14) and sg.std() > 15:
+                                if float(np.dot(_norm_pattern(sg), TPL_GRAY_NORM) / TPL_GRAY_NORM.size) > 0.95:
+                                    matched_sign = "GRAY_SIGN"
+                                    break
+                            sw = arr_lum[yy1+2:yy2-8:2, x1+2:x2-2:2]
+                            if sw.shape == (11, 14) and sw.std() > 15:
+                                if float(np.dot(_norm_pattern(sw), TPL_WOOD_NORM) / TPL_WOOD_NORM.size) > 0.95:
+                                    matched_sign = "WOOD_SIGN"
+                                    break
+                    else:
+                        sub_top = arr_lum[y1+2:h:2, x1+2:x2-2:2]
+                        if sub_top.shape == (7, 14) and sub_top.std() > 15:
+                            sub_n = _norm_pattern(sub_top)
+                            if float(np.dot(sub_n, _norm_pattern(_TPL_WOOD_INT[:7])) / sub_n.size) > 0.95:
+                                matched_sign = "WOOD_SIGN"
+                            elif float(np.dot(sub_n, _norm_pattern(_TPL_GRAY_INT[:7])) / sub_n.size) > 0.95:
+                                matched_sign = "GRAY_SIGN"
+
+                    if matched_sign:
+                        # Find walkable interaction tile, prioritizing 1 tile South (facing UP at sign)
+                        interact_tile = None
+                        for dc, dr in [(0, 1), (-1, 0), (1, 0), (0, -1)]:
+                            nc, nr = c + dc, r + dr
+                            if 0 <= nc < GRID_COLS and 0 <= nr < GRID_ROWS and grid[nr, nc] == CELL_WALKABLE:
+                                interact_tile = (nc, nr)
+                                break
+                        if interact_tile:
+                            grid[r, c] = CELL_OBSTACLE
+                            detected_signs.append((c, r, interact_tile, matched_sign))
+
+        # Sort signs by Manhattan distance to player and add closest as primary "SIGN" POI
+        if detected_signs:
+            p_col = player.tile_col if player.detected else 7
+            p_row = player.tile_row if player.detected else 4
+            detected_signs.sort(key=lambda s: abs(s[2][0] - p_col) + abs(s[2][1] - p_row))
+            for i, (sc, sr, sint, skind) in enumerate(detected_signs):
+                poi_name = "SIGN" if i == 0 else f"SIGN_{i+1}"
+                spx, spy = tile_to_pixel_center(sc, sr)
+                pois.append(POI(
+                    name=poi_name,
+                    category="OBJECT",
+                    tile_col=sc,
+                    tile_row=sr,
+                    pixel_x=spx,
+                    pixel_y=spy,
+                    description=f"Readable Signpost (Approach at Col {sint[0]}, Row {sint[1]} facing sign and press A to read location / landmark info)",
+                    interaction_tile=sint
+                ))
+            prim_c, prim_r, prim_int, _ = detected_signs[0]
+            notes.append(
+                f"READABLE SIGNPOST: A readable sign ('SIGN') is at Col {prim_c}, Row {prim_r} (interaction tile at Col {prim_int[0]}, Row {prim_int[1]}). If you are lost, disoriented, or unsure of your current location, choose 'GO_TO_POI' with target_poi 'SIGN' to read it and identify your location!"
             )
 
         # 3. Compute BFS Directional Reachability from Red's current tile so the LLM knows which directions are OPEN vs BLOCKED (dead ends)

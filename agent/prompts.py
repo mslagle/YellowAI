@@ -84,10 +84,16 @@ To reach the Pokémon League and challenge the Elite Four, you must earn 8 Gym B
   - Daisy's House is in the northeast (`EXPLORE_NORTHEAST`).
   - Professor Oak's Research Lab is in the southeast (`EXPLORE_SOUTHEAST` or `GO_TO_POI` / `ENTER_BUILDING` targeting `OAKS_LAB`).
   - Route 1 exit is to the north: advance into the grass (`intent: 'EXPLORE_NORTH'`) to trigger Professor Oak.
+- **Viridian City Overworld**:
+  - Route 1 (South exit to Pallet Town): Exit Viridian City via the SOUTH path. Ledges on Route 1 can be hopped going SOUTH.
+  - Poké Mart is in the east/center (Oak's Parcel collection).
+  - Pokémon Center is in the southwest (Free healing).
+  - Route 2 (North exit toward Viridian Forest & Pewter City): Blocked by Old Man until Oak's Parcel is delivered!
+  - **Oak's Parcel Mission Priority**: When carrying Oak's Parcel to Professor Oak, do NOT linger in Viridian City or re-enter Pokémon Center/Mart. Immediately use `intent: 'EXPLORE_SOUTH'` to head down Route 1 to Pallet Town!
 - **Doors, Stairs & Warps**:
   - Building doors, staircases, and cave entrances warp automatically when stepped onto.
   - Use `EXIT_ROOM` when inside any room to exit through the primary warp.
-  - Use `ENTER_BUILDING` when outside in front of a building to enter.
+  - Use `ENTER_BUILDING` when outside in front of a building to enter. Do NOT re-enter a building you just exited if your goal lies elsewhere!
 
 #### 5. Battle Strategy & Control
 - **High-Level Battle Decisions**:
@@ -121,11 +127,11 @@ A fast local NumPy collision and pathfinding motor controller analyzes the tile 
 1. High-Level Intent (`intent`):
    - `EXIT_ROOM`: Head for primary room exit, staircase, or door threshold.
    - `ENTER_BUILDING`: Step through doorway into target building (Pokecenter, Mart, Gym, Oak's Lab).
-   - `GO_TO_POI`: Pathfind to specific POI or object (set `target_poi` e.g. 'STAIRS_DOWN', 'OAKS_LAB', 'PC').
+   - `GO_TO_POI`: Pathfind to specific POI or object (set `target_poi` e.g. 'STAIRS_DOWN', 'OAKS_LAB', 'PC', 'SIGN'). If lost or unsure of your location, target 'SIGN' to read the nearest signpost and orient yourself!
    - `EXPLORE_NORTH`, `EXPLORE_SOUTH`, `EXPLORE_EAST`, `EXPLORE_WEST`: Advance along cardinal roads or paths.
    - `EXPLORE_NORTHEAST`, `EXPLORE_NORTHWEST`, `EXPLORE_SOUTHEAST`, `EXPLORE_SOUTHWEST`: Advance diagonally across towns or open areas (e.g. `EXPLORE_SOUTHEAST` to reach Oak's Lab in southeast Pallet Town).
    - `TALK_TO_NPC`: Approach and speak to NPC (set `target_poi` e.g. 'MOM', 'NURSE_JOY', 'OAK').
-   - `ADVANCE_DIALOGUE`: When a speech bubble or dialogue window is OPEN on screen, choose `ADVANCE_DIALOGUE` to advance the text. Carefully inspect the focused speech bubble crop and transcribe the exact words into `dialogue_text`.
+   - `ADVANCE_DIALOGUE`: When a speech bubble or dialogue window is OPEN on screen, choose `ADVANCE_DIALOGUE` to advance the text. Carefully inspect the focused speech bubble crop and transcribe the exact words into `dialogue_text`. If reading a sign, use the text to identify your town, route, or landmark!
    - `BATTLE_ACTION`: Choose strategy when in battle (FIGHT, BAG, SWITCH_POKEMON, RUN).
    - `WAIT`: Pause 1 turn for screen animation or cutscene.
 2. Battle Strategy (when screen is in BATTLE mode):
@@ -179,6 +185,8 @@ def build_turn_prompt(
 
     if active_quest:
         sections.append(f"[CURRENT TOP-PRIORITY QUEST]: >>> {active_quest} <<<\nPrioritize fulfilling this directive before continuing onward!")
+        if "oak's parcel" in active_quest.lower() and "pallet town" in active_quest.lower():
+            sections.append("[OAK'S PARCEL RETURN DIRECTIVE]: You are currently carrying Oak's Parcel in Viridian City! You MUST walk SOUTH out of Viridian City onto Route 1 and hop down the ledges to Pallet Town to deliver it to Professor Oak. Do NOT head north, do NOT enter the Mart or Poké Center, and choose `intent: 'EXPLORE_SOUTH'`!")
 
     if battle_advisor_prompt:
         sections.append(battle_advisor_prompt)

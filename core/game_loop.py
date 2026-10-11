@@ -49,6 +49,7 @@ from core.anti_stuck import AntiStuckWatchdog, OPPOSITE_DIRECTIONS
 from core.screen_analyzer import ScreenAnalyzer
 from core.movement_controller import MovementController
 from core.battle_controller import BattleController
+from core.logger import log_file_only
 from tts.audio_queue import AudioQueueManager
 from overlay.server import OverlayServer
 
@@ -153,7 +154,12 @@ class GameLoop:
     def _detect_screen_mode(self, frame: Image.Image) -> Tuple[Any, str]:
         """Analyzes frame via NumPy ScreenAnalyzer and generates grounded prompt with POIs."""
         scene = self.screen_analyzer.analyze(frame, current_area_hint=self.memory_manager.current_area)
-        self.memory_manager.current_area = scene.area_description
+        if scene.area_type == "OVERWORLD":
+            cur_lower = (self.memory_manager.current_area or "").lower()
+            if not any(k in cur_lower for k in ("viridian", "route 1", "route 2", "pewter", "forest")):
+                self.memory_manager.current_area = scene.area_description
+        else:
+            self.memory_manager.current_area = scene.area_description
 
         notes_joined = " ".join(scene.spatial_notes)
         if ("PIKACHU_FOLLOWING" in notes_joined or "STARTER_ALREADY_CLAIMED" in notes_joined) and not self.memory_manager.team:
@@ -190,7 +196,27 @@ class GameLoop:
                 for q in list(self.memory_manager.quests):
                     if "choose starter" in q.lower() or "starter pokémon" in q.lower():
                         self.memory_manager.complete_quest(q)
-                if any(p.name == "EXITED_HOUSE_DOOR" for p in scene.pois):
+                has_parcel = any("parcel" in q.lower() for q in self.memory_manager.quests) or any("parcel" in kn.lower() for kn in self.memory_manager.knowledge_notes)
+                parcel_delivered = any("pokedex" in kn.lower() or "pokédex" in kn.lower() or "delivered oak's parcel" in kn.lower() for kn in self.memory_manager.knowledge_notes)
+                is_viridian = any(p.name in ("POKECENTER_DOOR", "POKEMART_DOOR") for p in scene.pois) or "viridian" in self.memory_manager.current_area.lower()
+                is_pallet_exit = any(p.name == "EXITED_HOUSE_DOOR" for p in scene.pois) and not is_viridian
+
+                if has_parcel and not parcel_delivered:
+                    self.memory_manager.set_priority_quest("Deliver Oak's Parcel back to Professor Oak in Pallet Town")
+                    if is_viridian:
+                        self.memory_manager.set_current_area("Viridian City")
+                        self.memory_manager.update_micro_step("Walk SOUTH out of Viridian City and hop down Route 1 ledges to Pallet Town.")
+                    else:
+                        self.memory_manager.update_micro_step("Visit Professor Oak's Lab in southeast Pallet Town to deliver the parcel.")
+                elif is_viridian:
+                    self.memory_manager.set_current_area("Viridian City")
+                    for q in list(self.memory_manager.quests):
+                        if "leave pallet" in q.lower() or "route 1" in q.lower() or "heal" in q.lower():
+                            self.memory_manager.complete_quest(q)
+                    if "pewter" not in current_prio and "forest" not in current_prio and "brock" not in current_prio:
+                        self.memory_manager.set_priority_quest("Travel NORTH from Viridian City along Route 2 through Viridian Forest to defeat Brock at Pewter City Gym")
+                        self.memory_manager.update_micro_step("Walk NORTH through Viridian City to the Route 2 gatehouse.")
+                elif is_pallet_exit:
                     for q in list(self.memory_manager.quests):
                         if "mom" in q.lower() or "goodbye" in q.lower():
                             self.memory_manager.complete_quest(q)
@@ -202,22 +228,52 @@ class GameLoop:
                 if any(k in current_micro for k in ["front door", "exit house", "starter table", "downstairs", "bedroom"]):
                     self.memory_manager.update_micro_step("Walk southeast around the fence to Professor Oak's Lab entrance.")
         elif scene.area_type == "OAKS_LAB":
-            if "LAB_TABLE_EMPTY (OAK NOT HERE)" in notes_joined:
+            has_parcel = any("parcel" in q.lower() for q in self.memory_manager.quests) or any("parcel" in kn.lower() for kn in self.memory_manager.knowledge_notes)
+            parcel_delivered = any("pokedex" in kn.lower() or "pokédex" in kn.lower() or "delivered oak's parcel" in kn.lower() for kn in self.memory_manager.knowledge_notes)
+            if has_parcel and not parcel_delivered:
+                self.memory_manager.set_priority_quest("Talk to Professor Oak to deliver Oak's Parcel and receive the Pokédex")
+                self.memory_manager.update_micro_step("Walk UP to Professor Oak and press A to deliver the parcel.")
+            elif "LAB_TABLE_EMPTY (OAK NOT HERE)" in notes_joined:
                 self.memory_manager.set_priority_quest("Exit Professor Oak's Lab and walk NORTH into the tall grass exit of Pallet Town to trigger Professor Oak")
                 self.memory_manager.update_micro_step("Walk SOUTH to LAB_EXIT to leave the empty Lab, then walk NORTH to the tall grass exit of Pallet Town.")
             elif "STARTER_ALREADY_CLAIMED" in notes_joined or has_starter:
                 for q in list(self.memory_manager.quests):
                     if "choose" in q.lower() or "starter" in q.lower():
                         self.memory_manager.complete_quest(q)
-                self.memory_manager.set_priority_quest("Exit Professor Oak's Lab, say goodbye to Mom in Mom's House, and travel NORTH on Route 1 to Viridian City")
+                self.memory_manager.set_priority_quest("Exit Professor Oak's Lab and travel NORTH via Route 1, Route 2, and Viridian Forest to defeat Brock at Pewter City Gym")
                 self.memory_manager.update_micro_step("Walk SOUTH to LAB_EXIT to exit Professor Oak's Lab into Pallet Town.")
             elif not has_starter:
                 self.memory_manager.set_priority_quest("Approach the Starter Table in Professor Oak's Lab and press A on the Poké Ball to claim Starter Pikachu")
                 if any(k in current_micro for k in ["southeast", "door", "entrance", "outside", "pallet", "tall grass"]):
                     self.memory_manager.update_micro_step("Walk to STARTER_TABLE on the right and press A to claim Starter Pikachu.")
+        elif scene.area_type == "POKECENTER":
+            for q in list(self.memory_manager.quests):
+                if "travel north" in q.lower() or "leave pallet" in q.lower() or "route 1" in q.lower():
+                    self.memory_manager.complete_quest(q)
+            if "heal" not in current_prio and "pewter" not in current_prio and "brock" not in current_prio and "parcel" not in current_prio:
+                self.memory_manager.set_priority_quest("Heal Pikachu with Nurse Joy, then head NORTH via Route 2 and Viridian Forest to Pewter City Gym")
+                self.memory_manager.update_micro_step("Talk to Nurse Joy at the counter to heal, then exit the Pokémon Center.")
+        elif scene.area_type == "POKEMART":
+            for q in list(self.memory_manager.quests):
+                if "travel north" in q.lower() or "route 1" in q.lower():
+                    self.memory_manager.complete_quest(q)
 
-        if scene.is_battle or self.in_battle:
+        if scene.is_bag_menu or scene.area_type == "BAG_MENU":
+            if scene.bag_items_empty:
+                if self.memory_manager.supplies.get("poke_balls", 0) > 0 or self.memory_manager.supplies.get("potions", 0) > 0:
+                    self.memory_manager.update_supplies(poke_balls=0, potions=0)
+                bag_warning = "BAG NOTICE: Inventory pocket is EMPTY (0 items / only 'Cancel'). You have 0 usable items or Poké Balls in this pocket! In battle, do NOT choose BAG; select FIGHT to attack or RUN to flee."
+                if bag_warning not in scene.spatial_notes:
+                    scene.spatial_notes.append(bag_warning)
+
+        if scene.is_battle:
             self.in_battle = True
+            if self.memory_manager.supplies.get("poke_balls", 0) == 0:
+                scene.spatial_notes.append("BATTLE ALERT: You currently have 0 Poké Balls available in your active items pocket. Do NOT select BAG. Choose FIGHT to defeat the Pokémon or RUN to escape.")
+        elif not scene.is_battle and self.in_battle and scene.area_type not in ("BATTLE", "BAG_MENU"):
+            self.in_battle = False
+            self.current_opponent = None
+            self.battle_advisor_given_for_opponent = None
 
         prompt = self.screen_analyzer.format_grounded_prompt(scene)
         return scene, prompt
@@ -305,12 +361,15 @@ class GameLoop:
                     print("Gemini API call canceled. Stopping game loop.")
                     break
 
-                # If caught mid-doorway black fade transition, wait for fade-in to finish
-                if thumb is not None and float(thumb.mean()) < 22.0:
-                    time.sleep(0.6)
-                    re_frame, re_thumb = self.screen_capture.capture_frame()
-                    if re_frame is not None:
-                        frame, thumb = re_frame, re_thumb
+                # If caught mid-doorway or menu open black fade transition, wait for fade to finish
+                for _ in range(3):
+                    if thumb is not None and float(thumb.mean()) < 25.0:
+                        time.sleep(0.4)
+                        re_frame, re_thumb = self.screen_capture.capture_frame()
+                        if re_frame is not None:
+                            frame, thumb = re_frame, re_thumb
+                    else:
+                        break
 
                 latest_frame = frame
 
@@ -333,14 +392,16 @@ class GameLoop:
                 repeated_a, repeat_alert = self.anti_stuck.check_repeated_action("A", threshold=3)
                 if repeated_a and repeat_alert:
                     stuck_alert = f"{stuck_alert}\n{repeat_alert}" if stuck_alert else repeat_alert
-                    print(f"[Watchdog Notice] Repeated dialogue/action loop detected. Alerting Gemini.")
+                    log_file_only(f"[Watchdog Notice] Repeated dialogue/action loop detected. Alerting Gemini.")
 
                 action_history_prompt = self.anti_stuck.get_action_history_prompt()
                 if is_stuck and stuck_alert:
-                    print(f"[Watchdog Alert]: {stuck_alert}")
+                    log_file_only(f"[Watchdog Alert]: {stuck_alert}")
 
                 # 6. Assemble memory context
                 memory_prompt = self.memory_manager.get_memory_context_prompt()
+
+                memory_changed_items: List[str] = []
 
                 # Check if Last-Ditch Effort / Tactical Rescue is triggered
                 is_rescue, rescue_reason = self.anti_stuck.is_rescue_needed(
@@ -348,11 +409,7 @@ class GameLoop:
                 )
 
                 if ENABLE_RESCUE_THINKING and is_rescue:
-                    print("\n" + "=" * 65)
-                    print(" [LAST DITCH RESCUE TRIGGERED]")
-                    print(f" Condition: {rescue_reason}")
-                    print(f" Activating Medium Thinking Budget ({RESCUE_THINKING_BUDGET} tokens) + Web Search Grounding...")
-                    print("=" * 65)
+                    log_file_only(f"[Tactical Rescue Triggered] Condition: {rescue_reason}")
 
                     api_start = time.time()
                     rescue_result = self.gemini_player.consult_tactical_rescue(
@@ -377,18 +434,14 @@ class GameLoop:
 
                     clues = rescue_result.get("clues_found", "")
                     if clues:
-                        print(f"[Rescue Internet Clues]: {clues}")
                         self.memory_manager.add_knowledge_note(clues.strip())
-                    print(f"[Rescue Analysis]: {rescue_result.get('situation_analysis', '')}")
-                    print(f"[Rescue Plan]: {rescue_result.get('tactical_plan', '')}")
-                    plan_str = " -> ".join(flat_actions) if len(flat_actions) > 1 else button
-                    print(f"Action Plan: [{plan_str}] | Reason: '{reasoning}' (Cadence: {cadence})")
+                        memory_changed_items.append(f"Clues: {clues.strip()[:60]}")
 
                     # Update micro-step and short-term memory with tactical breakthrough
                     new_micro = rescue_result.get("updated_micro_step")
                     if new_micro and isinstance(new_micro, str):
                         self.memory_manager.update_micro_step(new_micro.strip())
-                        print(f"[Micro-Step Updated via Rescue]: '{new_micro.strip()}'")
+                        memory_changed_items.append(f"Step: {new_micro.strip()}")
 
                     rescue_plan = rescue_result.get("tactical_plan", "")
                     if rescue_plan:
@@ -416,7 +469,7 @@ class GameLoop:
                             trigger_battle_thinking = True
                             battle_advisor_prompt = BATTLE_TACTICAL_GUIDANCE
                             opp_label = self.current_opponent or "New Encounter"
-                            print(f"\n[Battle Strategy Triggered] Allocating {BATTLE_THINKING_BUDGET} thinking tokens for {opp_label}!")
+                            log_file_only(f"[Battle Strategy Triggered] Allocating {BATTLE_THINKING_BUDGET} thinking tokens for {opp_label}!")
 
                     api_start = time.time()
                     decision = self.gemini_player.decide_action(
@@ -448,17 +501,20 @@ class GameLoop:
 
                     if dialogue_text and isinstance(dialogue_text, str) and dialogue_text.strip() and dialogue_text.strip().upper() != "NULL":
                         clean_diag = dialogue_text.strip()
-                        print(f"\n[Speech Bubble Text]: \"{clean_diag}\"")
+                        log_file_only(f"[Speech Bubble Text]: \"{clean_diag}\"")
                         self.memory_manager.add_knowledge_note(f"Dialogue: {clean_diag}")
+                        identified_area = self.memory_manager.ingest_sign_or_dialogue_location(clean_diag)
+                        if identified_area:
+                            memory_changed_items.append(f"Oriented in '{identified_area}' via sign/dialogue")
 
-                    print(f"Strategic Decision: Intent=[{intent}] Target=[{target_poi or 'N/A'}] | Reason: '{reasoning}' (Cadence: {cadence})")
+                    log_file_only(f"Strategic Decision: Intent=[{intent}] Target=[{target_poi or 'N/A'}] | Reason: '{reasoning}' (Cadence: {cadence})")
 
                 # Update Battle Tracking & Enemy Changes
                 opp = decision.get("opponent_pokemon")
                 if opp and isinstance(opp, str) and opp.strip() and opp.strip().upper() != "NULL":
                     opp_clean = opp.strip()
                     if not self.in_battle or self.current_opponent != opp_clean:
-                        print(f"[Battle Opponent Detected]: {opp_clean}")
+                        log_file_only(f"[Battle Opponent Detected]: {opp_clean}")
                         self.in_battle = True
                         self.current_opponent = opp_clean
                     if trigger_battle_thinking:
@@ -466,7 +522,7 @@ class GameLoop:
                 elif (scene.is_battle or "BATTLE" in mode_hint) and not self.in_battle:
                     self.in_battle = True
                 elif not scene.is_battle and "OVERWORLD" in mode_hint and self.in_battle:
-                    print("[Battle Concluded] Returning to Overworld navigation.")
+                    log_file_only("[Battle Concluded] Returning to Overworld navigation.")
                     self.in_battle = False
                     self.current_opponent = None
                     self.battle_advisor_given_for_opponent = None
@@ -475,41 +531,44 @@ class GameLoop:
                 poi = decision.get("discovered_poi")
                 if poi and isinstance(poi, str) and poi.strip() and poi.strip().upper() != "NULL":
                     self.memory_manager.add_waypoint(self.memory_manager.current_area, poi.strip())
+                    memory_changed_items.append(f"Discovered POI: {poi.strip()}")
 
                 items_up = decision.get("items_update")
                 if items_up and isinstance(items_up, str) and items_up.strip() and items_up.strip().upper() != "NULL":
                     self.memory_manager.apply_items_update(items_up.strip())
+                    memory_changed_items.append(f"Items: {items_up.strip()}")
 
                 party_up = decision.get("party_update")
                 if party_up and isinstance(party_up, str) and party_up.strip() and party_up.strip().upper() != "NULL":
                     self.memory_manager.apply_party_update(party_up.strip())
+                    memory_changed_items.append(f"Party: {party_up.strip()}")
 
                 # Process Multi-Quest Log Updates
                 comp_q = decision.get("completed_quest")
                 if comp_q and isinstance(comp_q, str) and comp_q.strip() and comp_q.strip().upper() != "NULL":
                     removed = self.memory_manager.complete_quest(comp_q.strip())
                     if removed:
-                        print(f"[Quest Log] Completed & Removed: '{removed}'")
+                        memory_changed_items.append(f"Completed Quest: '{removed}'")
                         if self.memory_manager.priority_quest:
-                            print(f"[Quest Log] New Top Priority: '{self.memory_manager.priority_quest}'")
+                            memory_changed_items.append(f"Priority Quest: '{self.memory_manager.priority_quest}'")
 
                 new_q = decision.get("new_quest")
                 prio_q = decision.get("priority_quest")
                 if new_q and isinstance(new_q, str) and new_q.strip() and new_q.strip().upper() != "NULL":
                     is_prio = (prio_q == new_q or not self.memory_manager.priority_quest)
                     self.memory_manager.add_quest(new_q.strip(), is_priority=is_prio)
-                    print(f"[Quest Log] New Quest Added: '{new_q.strip()}' (Priority: {is_prio})")
+                    memory_changed_items.append(f"New Quest: '{new_q.strip()}'")
 
                 if prio_q and isinstance(prio_q, str) and prio_q.strip() and prio_q.strip().upper() != "NULL" and prio_q != new_q:
                     self.memory_manager.set_priority_quest(prio_q.strip())
-                    print(f"[Quest Log] Priority Set: '{prio_q.strip()}'")
+                    memory_changed_items.append(f"Priority Quest: '{prio_q.strip()}'")
 
                 # Process Micro-Step Updates
                 micro_s = decision.get("micro_step")
                 if micro_s and isinstance(micro_s, str) and micro_s.strip() and micro_s.strip().upper() != "NULL":
                     if self.memory_manager.micro_step != micro_s.strip():
                         self.memory_manager.update_micro_step(micro_s.strip())
-                        print(f"[Micro-Step Updated]: '{micro_s.strip()}'")
+                        memory_changed_items.append(f"Micro-Step: '{micro_s.strip()}'")
 
                 # Event-driven memory sync on doorway transitions
                 if self.anti_stuck.doorway_warp_turns == 2:
@@ -519,13 +578,25 @@ class GameLoop:
                 executed_actions: List[str] = []
 
                 if self._is_naming_screen(frame) or scene.is_naming_screen:
-                    print("[Naming Screen] Confirming default name (B -> START -> A)...")
+                    log_file_only("[Naming Screen] Confirming default name (B -> START -> A)...")
                     for nb in ["B", "START", "A"]:
                         self.input_controller.press_button(nb)
                         time.sleep(0.25)
                     executed_actions = ["B", "START", "A"]
+                elif scene.is_bag_menu or scene.area_type == "BAG_MENU":
+                    log_file_only("[Bag Screen] In-game Bag menu is open. Pressing B to dismiss...")
+                    if scene.bag_items_empty and (self.memory_manager.supplies.get("poke_balls", 0) > 0 or self.memory_manager.supplies.get("potions", 0) > 0):
+                        self.memory_manager.update_supplies(poke_balls=0, potions=0)
+                        memory_changed_items.append("Supplies: Discovered active pocket is empty (Poké Balls: 0)")
+                    self.input_controller.press_button("B")
+                    time.sleep(1.0)
+                    executed_actions = ["B"]
                 elif scene.is_battle or intent == "BATTLE_ACTION":
-                    print(f"[Battle Action] Executing {battle_action or 'FIGHT'} (Move Slot {move_slot or 1})...")
+                    if battle_action == "BAG" and self.memory_manager.supplies.get("poke_balls", 0) == 0:
+                        log_file_only("[Battle Fallback] Poké Balls count is 0! Overriding BAG -> FIGHT (Move Slot 1).")
+                        battle_action = "FIGHT"
+                        move_slot = move_slot or 1
+                    log_file_only(f"[Battle Action] Executing {battle_action or 'FIGHT'} (Move Slot {move_slot or 1})...")
                     battle_res = self.battle_controller.execute_battle_strategy(
                         battle_action=battle_action,
                         move_slot=move_slot,
@@ -535,7 +606,7 @@ class GameLoop:
                     )
                     executed_actions = battle_res.get("executed", [])
                 elif intent == "ADVANCE_DIALOGUE" or scene.is_dialogue:
-                    print("[Dialogue Action] Pressing A to advance text...")
+                    log_file_only("[Dialogue Action] Pressing A to advance text...")
                     self.input_controller.press_button("A")
                     executed_actions = ["A"]
                 elif intent == "WAIT":
@@ -544,6 +615,23 @@ class GameLoop:
                 else:
                     notes_joined = " ".join(scene.spatial_notes)
                     active_goal_text = f"{self.memory_manager.priority_quest or ''} {self.memory_manager.micro_step or ''} {reasoning or ''}".lower()
+
+                    # When holding Oak's Parcel to deliver to Professor Oak, do NOT re-enter Pokémon Center or Poké Mart!
+                    has_parcel_active = any("parcel" in q.lower() for q in self.memory_manager.quests) or any("parcel" in kn.lower() for kn in self.memory_manager.knowledge_notes)
+                    parcel_delivered_active = any("pokedex" in kn.lower() or "pokédex" in kn.lower() or "delivered oak's parcel" in kn.lower() for kn in self.memory_manager.knowledge_notes)
+                    if (
+                        scene.area_type == "OVERWORLD"
+                        and has_parcel_active
+                        and not parcel_delivered_active
+                        and "viridian" in (self.memory_manager.current_area or "").lower()
+                    ):
+                        if (
+                            intent in ("ENTER_BUILDING", "TALK_TO_NPC")
+                            or (intent == "GO_TO_POI" and target_poi and any(k in target_poi.upper() for k in ("POKECENTER", "POKEMART", "MART", "CENTER", "DOOR")))
+                        ):
+                            log_file_only(f"[Parcel Safeguard] Holding Oak's Parcel in Viridian City! Overriding {intent} ({target_poi}) -> EXPLORE_SOUTH (Heading to Pallet Town)")
+                            intent = "EXPLORE_SOUTH"
+                            target_poi = None
 
                     # If Professor Oak's Lab is visible on screen BEFORE we have a starter (and not heading to tall grass),
                     # snap generic EXPLORE_* intents directly to ENTER_BUILDING -> OAKS_LAB so we never walk past it!
@@ -556,13 +644,13 @@ class GameLoop:
                         and any(p.name == "OAKS_LAB" for p in scene.pois)
                     ):
                         if any(k in active_goal_text for k in ("oak", "lab", "starter")) or intent in ("EXPLORE_SOUTH", "EXPLORE_SOUTHEAST", "EXPLORE_EAST"):
-                            print(f"[POI Override] 'OAKS_LAB' is in frame! Overriding {intent} -> ENTER_BUILDING (Target=OAKS_LAB)")
+                            log_file_only(f"[POI Override] 'OAKS_LAB' is in frame! Overriding {intent} -> ENTER_BUILDING (Target=OAKS_LAB)")
                             intent = "ENTER_BUILDING"
                             target_poi = "OAKS_LAB"
                     elif scene.area_type == "OAKS_LAB":
                         if "LAB_TABLE_EMPTY (OAK NOT HERE)" in notes_joined or "STARTER_ALREADY_CLAIMED" in notes_joined:
                             if intent != "EXIT_ROOM":
-                                print(f"[Lab Override] Lab table is empty / starter already claimed! Overriding {intent} ({target_poi}) -> EXIT_ROOM (Target=LAB_EXIT)")
+                                log_file_only(f"[Lab Override] Lab table is empty / starter already claimed! Overriding {intent} ({target_poi}) -> EXIT_ROOM (Target=LAB_EXIT)")
                                 intent = "EXIT_ROOM"
                                 target_poi = "LAB_EXIT"
                         elif not self.memory_manager.team and (
@@ -570,7 +658,7 @@ class GameLoop:
                             or (intent.startswith("EXPLORE_") and "NORTH" not in intent)
                             or (target_poi and any(k in target_poi.upper() for k in ("EXIT", "LAB", "DOOR", "OAK")))
                         ):
-                            print(f"[Lab Safeguard] Inside Oak's Lab with Starter Poké Ball on table! Overriding {intent} ({target_poi}) -> GO_TO_POI (Target=STARTER_TABLE)")
+                            log_file_only(f"[Lab Safeguard] Inside Oak's Lab with Starter Poké Ball on table! Overriding {intent} ({target_poi}) -> GO_TO_POI (Target=STARTER_TABLE)")
                             intent = "GO_TO_POI"
                             target_poi = "STARTER_TABLE"
 
@@ -590,7 +678,7 @@ class GameLoop:
                             or live_scene.is_battle != scene.is_battle
                             or (live_scene.is_dialogue and not scene.is_dialogue)
                         ):
-                            print(
+                            log_file_only(
                                 f"[Stale Plan Guard] Scene changed during LLM call "
                                 f"({scene.area_type} -> {live_scene.area_type})! "
                                 f"Aborting stale {intent} plan and re-evaluating new room."
@@ -600,7 +688,7 @@ class GameLoop:
                             continue
 
                     # Deterministic Grid Pathfinding via MovementController!
-                    print(f"[Motor Execution] Pathfinding Intent=[{intent}] Target=[{target_poi or 'Auto'}]...")
+                    log_file_only(f"[Motor Execution] Pathfinding Intent=[{intent}] Target=[{target_poi or 'Auto'}]...")
                     move_res = self.movement_controller.plan_and_execute(
                         intent=intent,
                         target_poi_name=target_poi,
@@ -611,7 +699,7 @@ class GameLoop:
                     planned = move_res.get("planned_buttons", [])
                     if not executed_actions and planned:
                         executed_actions = planned
-                    print(f"[Movement Planned]: Route={move_res.get('target', '')} ({len(planned)} buttons: {' -> '.join(planned)})")
+                    log_file_only(f"[Movement Planned]: Route={move_res.get('target', '')} ({len(planned)} buttons: {' -> '.join(planned)})")
                     if move_res.get("interrupt_reason") == "SCENE_WARP_OR_BATTLE":
                         time.sleep(0.6)
 
@@ -626,7 +714,7 @@ class GameLoop:
 
                 action_summary = " -> ".join(executed_actions) if executed_actions else "WAIT"
                 if len(executed_actions) > 1:
-                    print(f"[Batch Executed]: [{action_summary}] ({len(executed_actions)} steps)")
+                    log_file_only(f"[Batch Executed]: [{action_summary}] ({len(executed_actions)} steps)")
 
                 # Update tracked character facing direction in overworld
                 for act in reversed(executed_actions):
@@ -645,25 +733,65 @@ class GameLoop:
                 self.previous_frame = latest_frame
 
                 # 10. Process Cadence Triggers
-                if thought:
-                    print(f"Thought (TTS): \"{thought}\"")
-                    if self.audio_queue:
-                        self.audio_queue.enqueue_thought(thought)
-
                 if "short_term_memory" in decision:
                     new_stm = decision["short_term_memory"]
-                    print(f"[Short-Term Memory Updated]: {new_stm}")
+                    log_file_only(f"[Short-Term Memory Updated]: {new_stm}")
                     self.memory_manager.update_short_term(new_stm)
 
                 if "medium_term_memory" in decision:
                     new_mtm = decision["medium_term_memory"]
-                    print(f"[Medium-Term Memory Updated]: {new_mtm}")
+                    log_file_only(f"[Medium-Term Memory Updated]: {new_mtm}")
                     self.memory_manager.update_medium_term(new_mtm)
 
                 if "long_term_memory" in decision:
                     new_ltm = decision["long_term_memory"]
-                    print(f"[Long-Term Memory Updated]: {new_ltm}")
+                    log_file_only(f"[Long-Term Memory Updated]: {new_ltm}")
                     self.memory_manager.update_long_term(new_ltm)
+
+                # =====================================================================
+                # User-Specified Console Turn Logging (Structured & Clean)
+                # 1. A small blurb about what the AI is thinking
+                # 2. What buttons we need to send based on what the AI wants to do
+                # 3. Any TTS if we have it
+                # 4. If in a battle sequence, the strategy to defeat or capture the pokemon
+                # 5. Changes to our current quests or updates to our memory
+                # =====================================================================
+                # 1. AI Thinking / Reasoning
+                ai_thought_blurb = reasoning.strip() if reasoning else (decision.get("situation_analysis", "").strip() or "Analyzing current situation.")
+                print(f"Thought: {ai_thought_blurb}")
+
+                # 2. Buttons to send
+                buttons_display = " -> ".join(executed_actions) if executed_actions else "WAIT"
+                print(f"Buttons: [{buttons_display}]")
+
+                # 3. TTS commentary
+                if thought and str(thought).strip():
+                    print(f"TTS: \"{thought.strip()}\"")
+                    if self.audio_queue:
+                        self.audio_queue.enqueue_thought(thought.strip())
+
+                # 4. Battle Sequence Strategy
+                if scene.is_battle or self.in_battle or intent == "BATTLE_ACTION":
+                    opp_name = self.current_opponent or "Wild Pokémon"
+                    act_type = battle_action or "FIGHT"
+                    if act_type == "BAG":
+                        item_label = target_item or "Poké Ball"
+                        strat_desc = f"Capture strategy: Use {item_label} to catch {opp_name}"
+                    elif act_type == "RUN":
+                        strat_desc = f"Flee strategy: Escape from battle against {opp_name}"
+                    elif act_type in ("SWITCH", "SWITCH_POKEMON"):
+                        strat_desc = f"Switch strategy: Switch to party slot {switch_target_slot or 2}"
+                    else:
+                        strat_desc = f"Combat strategy: Attack with Move Slot {move_slot or 1} to defeat {opp_name}"
+                    print(f"Battle Strategy: {strat_desc}")
+
+                # 5. Quest & Memory Updates
+                changes: List[str] = []
+                if memory_changed_items:
+                    changes.extend(memory_changed_items)
+                if changes:
+                    for chg in changes:
+                        print(f"Quest/Memory: {chg}")
 
                 # 11. Record History & Export Stream Overlay
                 self.memory_manager.log_turn(
@@ -683,7 +811,7 @@ class GameLoop:
                 prompt_tok = usage.get("prompt_tokens", 0)
                 cand_tok = usage.get("candidates_tokens", 0)
                 tok_str = f" | Tokens: {prompt_tok} in / {cand_tok} out" if prompt_tok else ""
-                print(f"[Turn {self.turn_id} Complete in {turn_duration:.2f}s] (API: {api_duration:.2f}s{tok_str} | Settle: {wait_time:.2f}s)")
+                log_file_only(f"[Turn {self.turn_id} Complete in {turn_duration:.2f}s] (API: {api_duration:.2f}s{tok_str} | Settle: {wait_time:.2f}s)")
 
                 if max_turns and self.turn_id >= max_turns:
                     print(f"\n[GameLoop] Reached maximum requested turns ({max_turns}). Stopping.")

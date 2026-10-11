@@ -293,6 +293,46 @@ class MemoryManager:
             self.current_area = area.strip()
             self.save()
 
+    def ingest_sign_or_dialogue_location(self, dialogue_text: str) -> Optional[str]:
+        """
+        Parses dialogue text from an on-screen sign or NPC to determine location.
+        Recognizes Pallet Town, Route 1, Viridian City, Route 22, Route 2, Viridian Forest, Pewter City, etc.
+        Updates self.current_area and appends landmark knowledge note.
+        """
+        if not dialogue_text or not isinstance(dialogue_text, str) or dialogue_text.strip().upper() == "NULL":
+            return None
+        t_clean = dialogue_text.strip()
+        t_lower = t_clean.lower()
+
+        # Known regional landmarks and town names in Yellow Recharged
+        area_patterns = [
+            ("Viridian Forest", ["viridian forest"]),
+            ("Pewter City", ["pewter city", "pewter gym", "brock"]),
+            ("Route 22", ["route 22", "pokemon league", "pokémon league"]),
+            ("Route 2", ["route 2"]),
+            ("Viridian City", ["viridian city", "viridian mart", "viridian center", "eternally green"]),
+            ("Route 1", ["route 1"]),
+            ("Pallet Town", ["pallet town", "oak's lab", "oaks lab", "oak pokemon research", "red's house", "blue's house", "daisy's house"]),
+        ]
+
+        matched_area = None
+        for area_name, patterns in area_patterns:
+            if any(p in t_lower for p in patterns):
+                matched_area = area_name
+                break
+
+        if matched_area:
+            prev = self.current_area
+            self.current_area = matched_area
+            self.add_route_node(matched_area)
+            note = f"Signpost Read: Location identified as '{matched_area}' (Sign: \"{t_clean[:60]}\")"
+            self.add_knowledge_note(note)
+            print(f"[MemoryManager] Signpost Location Ingested: '{matched_area}' (was: '{prev}')")
+            self.save()
+            return matched_area
+
+        return None
+
     def _auto_detect_area(self, text: str):
         """Detects if memory text indicates a new town or route."""
         if not text:

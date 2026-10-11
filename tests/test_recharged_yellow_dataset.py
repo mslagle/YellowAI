@@ -59,6 +59,7 @@ class TestRechargedYellowDataset(unittest.TestCase):
             ("naming_screen_player.png", "NAMING_SCREEN", "ADVANCE_DIALOGUE"),
             ("naming_screen_rival.png", "NAMING_SCREEN", "ADVANCE_DIALOGUE"),
             ("trainer_card.png", "TRAINER_CARD", "ADVANCE_DIALOGUE"),
+            ("bag_menu.png", "BAG_MENU", "EXIT_ROOM"),
             ("battle_wild_rattata_menu.png", "BATTLE", "BATTLE_ACTION"),
             ("battle_wild_pidgey_text.png", "BATTLE", "BATTLE_ACTION"),
             ("battle_move_select.png", "BATTLE", "BATTLE_ACTION"),
@@ -70,7 +71,7 @@ class TestRechargedYellowDataset(unittest.TestCase):
                 self.assertEqual(scene.area_type, expected_area)
                 self.assertIn(expected_intent, scene.available_intents)
 
-                if expected_area == "TRAINER_CARD":
+                if expected_area in ("TRAINER_CARD", "BAG_MENU"):
                     res = self.mover.plan_and_execute("EXIT_ROOM", None, scene, img)
                     self.assertTrue(res["success"])
                     self.assertEqual(res["planned_buttons"], ["B"])
@@ -213,6 +214,31 @@ class TestRechargedYellowDataset(unittest.TestCase):
                     res = self.mover.plan_and_execute("TALK_TO_NPC", "MART_CLERK", scene, img)
                     self.assertTrue(res["success"])
                     self.assertEqual(res["planned_buttons"], ["LEFT", "A"])
+
+    def test_05b_pokecenter_interior(self):
+        """Verifies Pokémon Center interior Nurse Joy, PC, and exit localization and counter pathing."""
+        img = load_fixture("viridian_pokecenter_interior.png")
+        scene = self.analyzer.analyze(img)
+        self.assertEqual(scene.area_type, "POKECENTER")
+        self.assertTrue(scene.player.detected)
+        self.assertEqual((scene.player.tile_col, scene.player.tile_row), (7, 4))
+
+        pois = {p.name: p for p in scene.pois}
+        self.assertIn("NURSE_JOY", pois)
+        self.assertIn("CENTER_EXIT", pois)
+        self.assertIn("PC", pois)
+        self.assertEqual(pois["NURSE_JOY"].interaction_tile, (7, 1))
+        self.assertEqual(pois["CENTER_EXIT"].interaction_tile, (7, 5))
+
+        # Healing path: step UP to counter and press A
+        res_heal = self.mover.plan_and_execute("TALK_TO_NPC", "NURSE_JOY", scene, img)
+        self.assertTrue(res_heal["success"])
+        self.assertEqual(res_heal["planned_buttons"], ["UP", "UP", "UP", "A"])
+
+        # Exit path: step DOWN to exit mat
+        res_exit = self.mover.plan_and_execute("EXIT_ROOM", "CENTER_EXIT", scene, img)
+        self.assertTrue(res_exit["success"])
+        self.assertEqual(res_exit["planned_buttons"], ["DOWN", "DOWN", "DOWN"])
 
     def test_06_overworld_doors_and_landmarks(self):
         """Verifies Overworld classification and door detection across Day/Dusk/Night in Pallet Town & Viridian City."""

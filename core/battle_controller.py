@@ -39,42 +39,106 @@ class BattleController:
         action = (battle_action or "FIGHT").upper().strip()
 
         # Check battle UI state if frame is provided:
-        # 1) Battle dialogue / text box (orange/teal full-width box, neither 2x2 command box nor move list is white) -> press ["A"]
-        # 2) Move selection sub-menu already open (left box x=16..300, y=235..310 is bright white)
+        # In day or night mode:
+        # Command box is at x=250..470, y=235..310 (Day fill: white/cream RGB > 200; Night fill: dark teal/gray RGB 70..130)
+        # Move select sub-menu expands move options across left box (Day fill: white RGB > 200; Night fill: dark teal/gray)
         in_move_select = False
+        has_command_box = False
         if frame is not None:
             try:
                 arr = np.array(frame.resize((480, 320)).convert("RGB"))
                 right_menu = arr[235:310, 250:470]
                 left_box = arr[235:310, 16:300]
-                right_white = float(np.mean((right_menu[:, :, 0] > 230) & (right_menu[:, :, 1] > 230) & (right_menu[:, :, 2] > 230)))
-                left_white = float(np.mean((left_box[:, :, 0] > 230) & (left_box[:, :, 1] > 230) & (left_box[:, :, 2] > 230)))
-                if right_white < 0.25 and left_white < 0.25:
-                    # Battle text / narrative banner is active (e.g., "Wild PIDGEY appeared!", "Prof. Oak used Poké Ball!")
-                    return ["A"]
-                if left_white >= 0.45:
+                
+                # Command box fill detection (Day or Night)
+                right_fill_day = float(np.mean((right_menu[:, :, 0] > 200) & (right_menu[:, :, 1] > 200) & (right_menu[:, :, 2] > 200)))
+                right_fill_night = float(np.mean(
+                    (right_menu[:, :, 0] > 65) & (right_menu[:, :, 0] < 135) &
+                    (right_menu[:, :, 1] > 65) & (right_menu[:, :, 1] < 135) &
+                    (np.abs(right_menu[:, :, 0].astype(int) - right_menu[:, :, 1].astype(int)) < 18)
+                ))
+                has_command_box = (right_fill_day >= 0.35 or right_fill_night >= 0.45)
+
+                left_fill_day = float(np.mean((left_box[:, :, 0] > 200) & (left_box[:, :, 1] > 200) & (left_box[:, :, 2] > 200)))
+                left_fill_night = float(np.mean(
+                    (left_box[:, :, 0] > 65) & (left_box[:, :, 0] < 135) &
+                    (left_box[:, :, 1] > 65) & (left_box[:, :, 1] < 135) &
+                    (np.abs(left_box[:, :, 0].astype(int) - left_box[:, :, 1].astype(int)) < 18)
+                ))
+                if (left_fill_day >= 0.45 or left_fill_night >= 0.55) and not has_command_box:
                     in_move_select = True
+
+                # If neither the 2x2 command box nor move selection is present, a full-screen battle dialogue banner is showing
+                if not has_command_box and not in_move_select:
+                    return ["A"]
             except Exception:
                 pass
+
+        # Detect current cursor position in 2x2 command box if not in move selection
+        current_cursor = "FIGHT"
+        if frame is not None and not in_move_select:
+            try:
+                arr = np.array(frame.resize((480, 320)).convert("RGB"))
+                slots = {
+                    "FIGHT": (252, 246, 268, 270),
+                    "BAG": (368, 246, 382, 270),
+                    "POKEMON": (252, 280, 268, 304),
+                    "RUN": (368, 280, 382, 304),
+                }
+                scores = {}
+                for name, (x1, y1, x2, y2) in slots.items():
+                    crop = arr[y1:y2, x1:x2]
+                    dark = int(np.sum((crop[:, :, 0] < 110) & (crop[:, :, 1] < 110) & (crop[:, :, 2] < 110)))
+                    scores[name] = dark
+                best_slot = max(scores, key=scores.get)
+                if scores[best_slot] >= 30:
+                    current_cursor = best_slot
+            except Exception:
+                pass
+
+        # Helper to compute navigation from current cursor to target command
+        # Layout:
+        # FIGHT (0,0)   | BAG (1,0)
+        # POKEMON (0,1) | RUN (1,1)
+        coords = {
+            "FIGHT": (0, 0),
+            "BAG": (1, 0),
+            "POKEMON": (0, 1),
+            "RUN": (1, 1),
+        }
+
+        def nav_to_command(target_cmd: str) -> List[str]:
+            cur_x, cur_y = coords.get(current_cursor, (0, 0))
+            tgt_x, tgt_y = coords[target_cmd]
+            seq = []
+            if tgt_x > cur_x:
+                seq.append("RIGHT")
+            elif tgt_x < cur_x:
+                seq.append("LEFT")
+            if tgt_y > cur_y:
+                seq.append("DOWN")
+            elif tgt_y < cur_y:
+                seq.append("UP")
+            return seq
 
         # 1. RUN from battle
         if action == "RUN":
             if in_move_select:
                 return ["B", "DOWN", "RIGHT", "A"]
-            # Cursor from FIGHT -> DOWN to POKEMON -> RIGHT to RUN -> A to confirm
-            return ["DOWN", "RIGHT", "A"]
+            return nav_to_command("RUN") + ["A"]
 
         # 2. BAG / Use Item (Poké Ball or Potion)
         if action == "BAG":
             if in_move_select:
                 return ["B", "RIGHT", "A", "A"]
-            # Cursor from FIGHT -> RIGHT to BAG -> A to open -> A to use selected item
-            return ["RIGHT", "A", "A"]
+            return nav_to_command("BAG") + ["A", "A"]
 
         # 3. SWITCH POKÉMON
         if action in ("SWITCH", "SWITCH_POKEMON", "POKEMON"):
             slot = switch_target_slot or 2
-            seq = ["B", "DOWN", "A"] if in_move_select else ["DOWN", "A"]
+            seq = ["B"] if in_move_select else []
+            seq.extend(nav_to_command("POKEMON"))
+            seq.append("A")
             steps_down = max(0, min(5, slot - 1))
             seq.extend(["DOWN"] * steps_down)
             seq.extend(["A", "A"])
@@ -82,7 +146,7 @@ class BattleController:
 
         # 4. FIGHT / Attack Move Selection
         slot = move_slot or 1
-        prefix = [] if in_move_select else ["A"]
+        prefix = [] if in_move_select else (nav_to_command("FIGHT") + ["A"])
         if slot == 1:
             return prefix + ["A"]
         elif slot == 2:
