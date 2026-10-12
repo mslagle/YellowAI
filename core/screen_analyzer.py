@@ -160,6 +160,20 @@ class ScreenAnalyzer:
         # 1. Check special screens first (Battle, Naming, Title/Main Menu, Trainer Card, Shop/Start Menu, Dialogue)
         is_naming = self._is_naming_screen(arr)
         is_battle = self._is_battle_screen(arr) and not is_naming
+        if is_battle:
+            # Overworld guard: If there is no orange battle narrative banner, check if Red is centered in the overworld
+            r_c = arr[:, :, 0].astype(int)
+            g_c = arr[:, :, 1].astype(int)
+            b_c = arr[:, :, 2].astype(int)
+            orange_banner = float(np.mean(
+                (r_c[235:310, 20:460] > 165) & (r_c[235:310, 20:460] < 215) &
+                (g_c[235:310, 20:460] > 95) & (g_c[235:310, 20:460] < 140) &
+                (b_c[235:310, 20:460] > 20) & (b_c[235:310, 20:460] < 55)
+            ))
+            if orange_banner < 0.40:
+                player_check = self._detect_player(arr)
+                if player_check.detected and player_check.tile_col == 7 and player_check.tile_row == 4:
+                    is_battle = False
         is_trainer_card = self._is_trainer_card(arr) and not is_battle and not is_naming
         is_title_or_menu, title_desc, is_oak_intro = self._is_title_or_main_menu(arr)
         if is_battle or is_naming or is_trainer_card:
@@ -377,12 +391,12 @@ class ScreenAnalyzer:
             if orange_banner > 0.45 and (ehud_cream > 0.20 or phud_cream > 0.20 or mint_sky > 0.45):
                 return True
 
-            # Fallback for dark battle banner + green HP bar or HUD card
+            # Fallback for dark battle banner + green HP bar or confirmed HUD cards (requires player HUD card or HP bar so overworld forest isn't misdetected)
             bottom_box = arr[220:, :, :]
             is_dark_banner = np.mean(bottom_box[:, :, 0] < 60) > 0.6 and np.mean(bottom_box[:, :, 2] > 60) > 0.3
             hp_green = (g > 200) & (r < 150) & (b < 150)
             has_hp = np.sum(hp_green) > 50
-            return bool(is_dark_banner and (has_hp or ehud_cream > 0.20 or ehud_night > 0.15))
+            return bool(is_dark_banner and (has_hp or ehud_cream > 0.20 or (ehud_night > 0.15 and phud_night > 0.20)))
         except Exception:
             return False
 
@@ -587,10 +601,10 @@ class ScreenAnalyzer:
         if (counter_red > 400 or (np.mean(center_floor) > 0.25 and np.sum(red_counter_emblem) > 150)) and tatami < 0.08 and lab_white < 0.35 and (total_void > 0.05 or is_dialogue or north_void):
             return "POKECENTER", "Pokémon Center - Free Healing Station"
 
-        # 4b. Gatehouse / Border Passage: Vertical blue runner carpet on left, gray turnstiles/pillars at North, red mat at South, void on East
-        gatehouse_blue = float(np.mean((b_all[:, :100] > 130) & (b_all[:, :100] > r_all[:, :100] + 30)))
-        gatehouse_void_east = float(np.mean(arr[:, 260:] < 25))
-        if gatehouse_blue > 0.20 and gatehouse_void_east > 0.60:
+        # 4b. Gatehouse / Border Passage: Distinctive blue runner carpet (width ~3-4 tiles, height >= 6 tiles) across yellow checkerboard floor
+        gatehouse_runner_cnt = int(np.sum((b_all > 130) & (b_all > r_all + 25) & (g_all > 105) & (g_all < 185)))
+        floor_yellow_cnt = int(np.sum((r_all > 150) & (g_all > 140) & (r_all > b_all + 25)))
+        if gatehouse_runner_cnt >= 5000 and floor_yellow_cnt >= 20000 and total_void > 0.05:
             return "GATEHOUSE", "Route 2 / Viridian Forest Gatehouse"
 
         # 5. House Indoor Rooms (Tatami wooden floor + green rug, Daytime + Nighttime): Distinguish 1F Living Room vs 2F Bedroom
@@ -1469,11 +1483,40 @@ class ScreenAnalyzer:
             interaction_tile=(guard_col, guard_row + 1)
         ))
 
-        # North Entrance/Exit (to Viridian Forest / Pewter City) at Col 3..4, Row 0
-        north_door_col = 3
-        north_door_row = 0
+        # 1. Locate North Doorway opening dynamically (distinctive dark portal adjacent to walkable floor)
+        north_door_col = 7
+        north_door_row = 3
+        doorway_found = False
+        for r in range(GRID_ROWS - 1):
+            for c in range(2, 13):
+                if grid[r, c] == CELL_VOID:
+                    continue
+                x1, y1, x2, y2 = tile_bounds(c, r)
+                patch = arr[y1:y2, x1:x2]
+                if patch.size > 0:
+                    dark_ratio = float(np.mean((patch[:, :, 0] < 125) & (patch[:, :, 1] < 125) & (patch[:, :, 2] < 135)))
+                    # Walkable floor or player directly below this tile indicates the doorway opening
+                    is_above_floor = (grid[r + 1, c] == CELL_WALKABLE) or (player.detected and (c, r + 1) == (player.tile_col, player.tile_row))
+                    if dark_ratio > 0.45 and is_above_floor:
+                        north_door_col = c
+                        north_door_row = r
+                        doorway_found = True
+                        break
+            if doorway_found:
+                break
+
         grid[north_door_row, north_door_col] = CELL_WARP
-        grid[north_door_row, north_door_col + 1] = CELL_WARP
+        if north_door_col + 1 < GRID_COLS and grid[north_door_row, north_door_col + 1] != CELL_VOID:
+            grid[north_door_row, north_door_col + 1] = CELL_WARP
+        if north_door_col - 1 >= 0 and grid[north_door_row, north_door_col - 1] != CELL_VOID:
+            grid[north_door_row, north_door_col - 1] = CELL_WARP
+
+        # Wall row directly above floor / adjacent to doorway
+        wall_row = max(0, north_door_row - 1)
+        for c in range(GRID_COLS):
+            if grid[wall_row, c] != CELL_VOID and grid[wall_row, c] != CELL_WARP:
+                grid[wall_row, c] = CELL_WALL
+
         npx, npy = tile_to_pixel_center(north_door_col, north_door_row)
         pois.insert(0, POI(
             name="NORTH_GATE",
@@ -1486,29 +1529,45 @@ class ScreenAnalyzer:
             interaction_tile=(north_door_col, north_door_row)
         ))
 
-        # South Entrance/Exit (back to Route 2 / Viridian City) at Col 1..2, Row 8
-        south_door_col = 1
+        # 2. South Exit doorway / mat
         south_door_row = 8
-        grid[south_door_row, south_door_col] = CELL_WARP
-        spx, spy = tile_to_pixel_center(south_door_col, south_door_row)
-        pois.append(POI(
-            name="SOUTH_GATE",
-            category="WARP",
-            tile_col=south_door_col,
-            tile_row=south_door_row,
-            pixel_x=spx,
-            pixel_y=spy,
-            description="South Exit doorway leading back to Route 2 / Viridian City",
-            interaction_tile=(south_door_col, south_door_row)
-        ))
+        south_door_col = 1
+        red_mat_found = False
+        for r in range(5, GRID_ROWS):
+            for c in range(GRID_COLS):
+                x1, y1, x2, y2 = tile_bounds(c, r)
+                patch = arr[y1:y2, x1:x2]
+                if patch.size > 0:
+                    is_red_mat = float(np.mean((patch[:, :, 0] > 160) & (patch[:, :, 1] < 110) & (patch[:, :, 2] < 110))) > 0.25
+                    if is_red_mat:
+                        south_door_col = c
+                        south_door_row = r
+                        red_mat_found = True
+                        break
+            if red_mat_found:
+                break
+
+        if red_mat_found:
+            grid[south_door_row, south_door_col] = CELL_WARP
+            spx, spy = tile_to_pixel_center(south_door_col, south_door_row)
+            pois.append(POI(
+                name="SOUTH_GATE",
+                category="WARP",
+                tile_col=south_door_col,
+                tile_row=south_door_row,
+                pixel_x=spx,
+                pixel_y=spy,
+                description="South Exit doorway leading back to Route 2 / Viridian City",
+                interaction_tile=(south_door_col, south_door_row)
+            ))
 
         notes.extend([
             "Red is inside the Route 2 / Viridian Forest Gatehouse.",
-            "PRIMARY OBJECTIVE: Walk NORTH through NORTH_GATE at (3, 0) to exit into Viridian Forest towards Pewter City!",
-            "NAVIGATION: Pathfind around the tables and step through NORTH_GATE at Col 3, Row 0."
+            f"To travel NORTH (toward Pewter City): Step NORTH through NORTH_GATE doorway at Col {north_door_col}, Row {north_door_row}.",
+            f"To travel SOUTH (toward Viridian City): Step SOUTH through SOUTH_GATE doorway at Col {south_door_col}, Row {south_door_row}."
         ])
 
-        available_intents.extend(["EXIT_ROOM", "TALK_TO_NPC", "GO_TO_POI", "EXPLORE_NORTH", "WAIT"])
+        available_intents.extend(["EXIT_ROOM", "GO_TO_POI", "EXPLORE_NORTH", "EXPLORE_SOUTH", "TALK_TO_NPC", "WAIT"])
 
     def _analyze_pokemart(
         self,
@@ -1660,15 +1719,21 @@ class ScreenAnalyzer:
                 pg = patch[:, :, 1].astype(int)
                 pb = patch[:, :, 2].astype(int)
 
-                # Check if walkable Tall Wild Grass (green grass clump on mint-cyan lawn background):
+                # Check if walkable Tall Wild Grass (green grass clump on mint-cyan lawn background, Daytime + Nighttime):
                 # Every pixel is green (all_green >= 0.72), top 4px show lawn background (top4_lawn >= 0.60), and 25%-55% of tile is lawn backdrop
                 all_green = float(np.mean(pg > pr + 15))
-                lawn_backdrop = float(np.mean((pb > pr + 12) & (pg > pr + 20) & (pb >= 75)))
+                lawn_backdrop = float(np.mean(
+                    ((pb > pr + 12) & (pg > pr + 20) & (pb >= 75)) |
+                    ((pb > pr + 10) & (pg > pr + 15) & (pb >= 30) & (pg < 100))
+                ))
                 top4 = patch[:min(4, patch.shape[0]), :]
                 top4_lawn = float(np.mean(
-                    (top4[:, :, 2].astype(int) > top4[:, :, 0].astype(int) + 12) &
-                    (top4[:, :, 1].astype(int) > top4[:, :, 0].astype(int) + 20) &
-                    (top4[:, :, 2].astype(int) >= 75)
+                    ((top4[:, :, 2].astype(int) > top4[:, :, 0].astype(int) + 12) &
+                     (top4[:, :, 1].astype(int) > top4[:, :, 0].astype(int) + 20) &
+                     (top4[:, :, 2].astype(int) >= 75)) |
+                    ((top4[:, :, 2].astype(int) > top4[:, :, 0].astype(int) + 10) &
+                     (top4[:, :, 1].astype(int) > top4[:, :, 0].astype(int) + 15) &
+                     (top4[:, :, 2].astype(int) >= 30) & (top4[:, :, 1].astype(int) < 100))
                 )) if top4.size > 0 else 0.0
 
                 is_tall_grass = (

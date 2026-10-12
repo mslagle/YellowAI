@@ -141,6 +141,10 @@ A fast local NumPy collision and pathfinding motor controller analyzes the tile 
    - Ground types are 100% immune to Electric (ThunderShock)! Use Normal moves or switch Pokémon!
    - Catching wild Pokémon: Weaken into yellow/red HP, then choose `battle_action: 'BAG'` and `target_item: 'POKE_BALL'`.
 3. General Direction & Quest Tracking:
+   - NEVER bypass foundational storyline quests, key items (Town Map, Pokédex), or essential equipment preparation (purchasing Poké Balls, Potions, and catching wild Pokémon to build a balanced team) to rush ahead toward gym battles!
+   - Ensure Red is properly equipped not just for current quests, but for future quests as well.
+   - If we have 0 Poké Balls or no catching supplies, prioritize visiting the nearest Poké Mart to purchase Poké Balls and Potions before pushing deeper into later areas.
+   - When encountering wild Pokémon that strengthen our roster, weaken them into yellow/red HP and catch them with Poké Balls (`battle_action: 'BAG'`, `target_item: 'POKE_BALL'`) instead of knocking them out.
    - Carefully read dialogue! When an NPC gives a quest or directive, record it in `new_quest`.
    - Update `priority_quest` to maintain clear operational focus.
    - Summarize next immediate physical milestone in `micro_step`.
