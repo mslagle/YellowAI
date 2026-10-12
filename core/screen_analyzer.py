@@ -1832,7 +1832,7 @@ class ScreenAnalyzer:
                         if grid[r + 1, col] == CELL_WALKABLE
                     ]
                     if width >= 3 and (len(walkable_below) >= 1 or (is_dialogue and r == 5)):
-                        # Verify this 2-row structure is architectural (roof + wall) and not Route 1 foliage/ledges
+                        # Verify this 2-row structure is architectural (roof + wall) and not Route 1 foliage/ledges or water pond
                         bx1, by1, _, _ = tile_bounds(c_start, r - 1)
                         _, _, bx2, by2 = tile_bounds(c_end, r)
                         b_patch = arr[max(0, by1):min(h, by2), max(0, bx1):min(w, bx2)]
@@ -1841,7 +1841,8 @@ class ScreenAnalyzer:
                             bg = b_patch[:, :, 1].astype(int)
                             bb = b_patch[:, :, 2].astype(int)
                             foliage_ratio = float(np.mean((bg > br + 20) & (bg > bb + 10)))
-                            if foliage_ratio > 0.25:
+                            water_pond_ratio = float(np.mean((bb == 222) & (bg == 165) & (br == 99)))
+                            if foliage_ratio > 0.25 or water_pond_ratio > 0.40:
                                 continue
 
                         # If clipped at right screen edge and narrow, door is still off-screen to the East
@@ -1858,7 +1859,7 @@ class ScreenAnalyzer:
                                 continue
                             x1, y1, x2, y2 = tile_bounds(col, r)
                             dp = arr[max(0, y1 + 6):min(h, y1 + 28), max(0, x1 + 4):min(w, x1 + 28)]
-                            if dp.size == 0 or float(dp.std()) < 22.0:
+                            if dp.size == 0 or float(dp.std()) < 22.0 or float(dp.std(axis=(0, 1)).max()) < 5.0:
                                 continue
                             dr = dp[:, :, 0].astype(int)
                             dg = dp[:, :, 1].astype(int)
