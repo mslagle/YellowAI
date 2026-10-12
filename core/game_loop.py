@@ -134,6 +134,8 @@ class GameLoop:
         self.battle_advisor_given_for_opponent: Optional[str] = None
         self.previous_frame: Optional[Image.Image] = None
         self.last_facing_direction: Optional[str] = None
+        self.consecutive_dialogue_turns: int = 0
+        self.last_dialogue_text: str = ""
 
     def _is_naming_screen(self, frame: Image.Image) -> bool:
         """Visual check for the GBA Gen 3 / Recharged Yellow naming keyboard screen in all modes (Upper/Lower/Symbols)."""
@@ -606,13 +608,38 @@ class GameLoop:
                     )
                     executed_actions = battle_res.get("executed", [])
                 elif intent == "ADVANCE_DIALOGUE" or scene.is_dialogue:
-                    log_file_only("[Dialogue Action] Pressing A to advance text...")
-                    self.input_controller.press_button("A")
-                    executed_actions = ["A"]
+                    clean_diag = dialogue_text.strip() if (dialogue_text and isinstance(dialogue_text, str)) else ""
+                    if clean_diag and clean_diag == self.last_dialogue_text:
+                        self.consecutive_dialogue_turns += 1
+                    elif clean_diag:
+                        self.last_dialogue_text = clean_diag
+                        self.consecutive_dialogue_turns = 1
+                    else:
+                        self.consecutive_dialogue_turns += 1
+
+                    # If stuck in a dialogue / sign repeat loop (reading the same sign or repeatedly triggering counter)
+                    if self.consecutive_dialogue_turns >= 3:
+                        log_file_only(f"[Dialogue Loop Break] Repeating dialogue for {self.consecutive_dialogue_turns} turns! Sending B + DOWN to break loop.")
+                        self.input_controller.press_button("B")
+                        time.sleep(0.1)
+                        self.input_controller.press_button("DOWN")
+                        executed_actions = ["B", "DOWN"]
+                        self.consecutive_dialogue_turns = 0
+                    elif not scene.dialogue_has_arrow:
+                        # Final line of dialogue / sign: press B to dismiss without re-interacting with the sign/NPC
+                        log_file_only("[Dialogue Action] Final text page (no arrow): Pressing B to dismiss cleanly...")
+                        self.input_controller.press_button("B")
+                        executed_actions = ["B"]
+                    else:
+                        log_file_only("[Dialogue Action] Pressing A to advance text...")
+                        self.input_controller.press_button("A")
+                        executed_actions = ["A"]
                 elif intent == "WAIT":
+                    self.consecutive_dialogue_turns = 0
                     time.sleep(self.turn_settle_delay)
                     executed_actions = ["WAIT"]
                 else:
+                    self.consecutive_dialogue_turns = 0
                     notes_joined = " ".join(scene.spatial_notes)
                     active_goal_text = f"{self.memory_manager.priority_quest or ''} {self.memory_manager.micro_step or ''} {reasoning or ''}".lower()
 

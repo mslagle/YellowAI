@@ -1747,7 +1747,7 @@ class ScreenAnalyzer:
 
                 # A) Walkable flat ground / dirt road / short lawn grass / cobblestone road border (min_channel >= 60, low color saturation)
                 roof_px = float(np.mean((pr > pg + 25) & (pr > pb + 15)))
-                water_px = float(np.mean((pb > pg + 25) & (pb > pr + 30) & (pr < 70)))
+                water_px = float(np.mean((pb > pr + 40) & (pb > pg + 20) & (pb >= 135)))
                 fence_px = float(np.mean((pr > pg + 15) & (pr > pb + 15) & (pr > 75) & (pr < 165)))
                 min_channel = int(patch.min())
                 gray_road = (
@@ -1758,7 +1758,7 @@ class ScreenAnalyzer:
                 is_flat_ground = (
                     (std_val < 16.5 or (std_val < 26.0 and min_channel >= 50 and all_green > 0.25) or gray_road)
                     and roof_px < 0.35
-                    and water_px < 0.45
+                    and water_px < 0.25
                     and fence_px < 0.20
                 )
 
@@ -2253,14 +2253,15 @@ class ScreenAnalyzer:
         open_dirs = [d for d, is_open in dir_reachability.items() if is_open]
         blocked_dirs = [d for d, is_open in dir_reachability.items() if not is_open]
 
-        if blocked_dirs:
-            notes.append(
-                f"BLOCKED DIRECTIONS (STUCK / DEAD END): Cannot move {', '.join(blocked_dirs)} from here — completely blocked by impassable trees/walls/water! Do NOT choose {', '.join('EXPLORE_' + d for d in blocked_dirs)}!"
-            )
-        if open_dirs:
-            notes.append(
-                f"OPEN EXPLORATION DIRECTIONS: {', '.join('EXPLORE_' + d for d in open_dirs)}."
-            )
+        if not is_dialogue:
+            if blocked_dirs:
+                notes.append(
+                    f"BLOCKED DIRECTIONS (STUCK / DEAD END): Cannot move {', '.join(blocked_dirs)} from here — completely blocked by impassable trees/walls/water! Do NOT choose {', '.join('EXPLORE_' + d for d in blocked_dirs)}!"
+                )
+            if open_dirs:
+                notes.append(
+                    f"OPEN EXPLORATION DIRECTIONS: {', '.join('EXPLORE_' + d for d in open_dirs)}."
+                )
 
         notes.extend([
             "Red is outdoors in the Overworld.",
@@ -2269,11 +2270,11 @@ class ScreenAnalyzer:
         ])
 
         available_intents.extend(["GO_TO_POI", "ENTER_BUILDING"])
-        if open_dirs:
+        if is_dialogue or not open_dirs:
+            available_intents.extend(["EXPLORE_SOUTH", "EXPLORE_NORTH", "EXPLORE_WEST", "EXPLORE_EAST"])
+        else:
             for d in open_dirs:
                 available_intents.append(f"EXPLORE_{d}")
-        else:
-            available_intents.extend(["EXPLORE_NORTH", "EXPLORE_WEST", "EXPLORE_SOUTH", "EXPLORE_EAST"])
         available_intents.extend(["TALK_TO_NPC", "WAIT"])
 
     # -------------------------------------------------------------------------
