@@ -2156,6 +2156,46 @@ class ScreenAnalyzer:
                 "JUST EXITED BUILDING: If heading to Professor Oak's Lab in Southeast Pallet Town, choose 'EXPLORE_SOUTHEAST' or 'EXPLORE_SOUTH' to walk around the house and fence."
             )
 
+        # 2c-ii. Rear Roof Eave Corridor:
+        # The top roof row of a building is an overhead layer that Red can walk BEHIND (e.g. the strip
+        # between a fence and the back of the Poké Mart). Such a tile shows ground in its top few pixels,
+        # roof below that, and the roof continues on the tile underneath it.
+        # Applied AFTER door detection so building/door structure detection is unaffected.
+        def _ground_ratio(p):
+            pr_, pg_, pb_ = p[:, :, 0], p[:, :, 1], p[:, :, 2]
+            lawn = (pg_ > pr_ + 20) & (pg_ >= pb_)
+            dirt = (pr_ >= 130) & (pg_ >= 105) & (pb_ < pr_ - 25) & (pr_ - pg_ < 45)
+            gray = (np.abs(pr_ - pg_) < 20) & (np.abs(pg_ - pb_) < 20) & (p.min(axis=2) >= 60)
+            return float(np.mean(lawn | dirt | gray))
+
+        eave_tiles = np.zeros_like(tree_mask_grid, dtype=bool)
+        for r in range(0, GRID_ROWS - 1):
+            for c in range(GRID_COLS):
+                if grid[r, c] != CELL_OBSTACLE or tree_mask_grid[r, c] or grid[r + 1, c] == CELL_WALKABLE:
+                    continue
+                x1, y1, x2, y2 = tile_bounds(c, r)
+                tile_p = arr[max(0, y1):min(h, y2), max(0, x1):min(w, x2)].astype(int)
+                if tile_p.shape[0] < 16 or tile_p.shape[1] < 16:
+                    continue
+                if _ground_ratio(tile_p[:4]) >= 0.70 and _ground_ratio(tile_p[8:]) < 0.30:
+                    eave_tiles[r, c] = True
+
+        for r in range(0, GRID_ROWS - 1):
+            for c in range(GRID_COLS):
+                if eave_tiles[r, c]:
+                    grid[r, c] = CELL_WALKABLE
+            # Fill single-tile gaps along the eave row (tiles hidden under Red / follower Pikachu sprites)
+            for c in range(1, GRID_COLS - 1):
+                if (
+                    grid[r, c] == CELL_OBSTACLE
+                    and not tree_mask_grid[r, c]
+                    and grid[r + 1, c] != CELL_WALKABLE
+                    and grid[r, c - 1] == CELL_WALKABLE
+                    and grid[r, c + 1] == CELL_WALKABLE
+                    and (eave_tiles[r, c - 1] or eave_tiles[r, c + 1])
+                ):
+                    grid[r, c] = CELL_WALKABLE
+
         # 2d. Detect Overworld Signs (Gray metal town/route signs and wooden notice signs)
         detected_signs = []
         if not is_dialogue:
