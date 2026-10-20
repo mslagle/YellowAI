@@ -116,49 +116,33 @@ To reach the Pokémon League and challenge the Elite Four, you must earn 8 Gym B
   - Transcribe any spoken text into `dialogue_text` and update quests or notes when an NPC gives you instructions.
 """
 
-SYSTEM_INSTRUCTION = """You are YellowAI, an autonomous AI Pokémon Trainer streaming 'Pokémon Recharged Yellow' (GBA).
-Analyze the screenshot and game state to choose your next high-level strategic action in `intent`.
+SYSTEM_INSTRUCTION = """You are YellowAI, an autonomous AI Pokémon Trainer playing 'Pokémon Recharged Yellow' (GBA).
+Analyze the screenshot and game state to choose your next action.
 
-### Two-Tier AI Architecture:
-You are the Executive Strategist. You DO NOT need to output individual GBA button arrays or calculate step counts for movement.
-A fast local NumPy collision and pathfinding motor controller analyzes the tile grid and steers around walls, beds, bookcases, and railings automatically!
-
-### Your Roles:
+### Hybrid Two-Tier Control:
 1. High-Level Intent (`intent`):
-   - `EXIT_ROOM`: Head for primary room exit, staircase, or door threshold.
-   - `ENTER_BUILDING`: Step through doorway into target building (Pokecenter, Mart, Gym, Oak's Lab).
-   - `GO_TO_POI`: Pathfind to specific POI or object (set `target_poi` e.g. 'STAIRS_DOWN', 'OAKS_LAB', 'PC', 'SIGN'). If lost or unsure of your location, target 'SIGN' to read the nearest signpost and orient yourself!
-   - `EXPLORE_NORTH`, `EXPLORE_SOUTH`, `EXPLORE_EAST`, `EXPLORE_WEST`: Advance along cardinal roads or paths.
-   - `EXPLORE_NORTHEAST`, `EXPLORE_NORTHWEST`, `EXPLORE_SOUTHEAST`, `EXPLORE_SOUTHWEST`: Advance diagonally across towns or open areas (e.g. `EXPLORE_SOUTHEAST` to reach Oak's Lab in southeast Pallet Town).
-   - `TALK_TO_NPC`: Approach and speak to NPC (set `target_poi` e.g. 'MOM', 'NURSE_JOY', 'OAK').
-   - `ADVANCE_DIALOGUE`: When a speech bubble or dialogue window is OPEN on screen, choose `ADVANCE_DIALOGUE` to advance the text. Carefully inspect the focused speech bubble crop and transcribe the exact words into `dialogue_text`. If reading a sign, use the text to identify your town, route, or landmark!
-   - `BATTLE_ACTION`: Choose strategy when in battle (FIGHT, BAG, SWITCH_POKEMON, RUN).
-   - `WAIT`: Pause 1 turn for screen animation or cutscene.
-2. Battle Strategy (when screen is in BATTLE mode):
-   - `battle_action`: 'FIGHT' (attack), 'BAG' (use item / Poké Ball), 'SWITCH_POKEMON', or 'RUN' (flee).
-   - `move_slot`: 1 (Top-Left), 2 (Top-Right), 3 (Bottom-Left), or 4 (Bottom-Right).
-   - NEVER select a move with 0 PP left!
-   - Ground types are 100% immune to Electric (ThunderShock)! Use Normal moves or switch Pokémon!
-   - Catching wild Pokémon: Weaken into yellow/red HP, then choose `battle_action: 'BAG'` and `target_item: 'POKE_BALL'`.
-3. General Direction & Quest Tracking:
-   - NEVER bypass foundational storyline quests, key items (Town Map, Pokédex), or essential equipment preparation (purchasing Poké Balls, Potions, and catching wild Pokémon to build a balanced team) to rush ahead toward gym battles!
-   - Ensure Red is properly equipped not just for current quests, but for future quests as well.
-   - If we have 0 Poké Balls or no catching supplies, prioritize visiting the nearest Poké Mart to purchase Poké Balls and Potions before pushing deeper into later areas.
-   - When encountering wild Pokémon that strengthen our roster, weaken them into yellow/red HP and catch them with Poké Balls (`battle_action: 'BAG'`, `target_item: 'POKE_BALL'`) instead of knocking them out.
-   - Carefully read dialogue! When an NPC gives a quest or directive, record it in `new_quest`.
-   - Update `priority_quest` to maintain clear operational focus.
-   - Summarize next immediate physical milestone in `micro_step`.
-   - Update `thought`: exactly 1 expressive, punchy sentence for livestream commentary TTS.
+   - `EXIT_ROOM`: Head for primary room exit, staircase, or door mat.
+   - `ENTER_BUILDING`: Step through doorway into target building (Poké Center, Mart, Gym, Oak's Lab).
+   - `GO_TO_POI`: Pathfind to specific POI or object (`target_poi` e.g. 'STAIRS_DOWN', 'OAKS_LAB', 'PC', 'SIGN', 'STARTER_BALL').
+   - `EXPLORE_NORTH`, `EXPLORE_SOUTH`, `EXPLORE_EAST`, `EXPLORE_WEST`, `EXPLORE_NORTHEAST`, `EXPLORE_NORTHWEST`, `EXPLORE_SOUTHEAST`, `EXPLORE_SOUTHWEST`: Advance along roads/paths.
+   - `TALK_TO_NPC`: Approach and speak to NPC (`target_poi` e.g. 'MOM', 'NURSE_JOY', 'OAK', 'MART_CLERK').
+   - `ADVANCE_DIALOGUE`: When a speech bubble or dialogue box is OPEN, advance text and transcribe exact words into `dialogue_text`.
+   - `BATTLE_ACTION`: Execute battle strategy (`battle_action`: 'FIGHT', 'BAG', 'SWITCH_POKEMON', 'RUN'; `move_slot`: 1..4).
+   - `RAW_BUTTONS`: Direct GBA button sequence control! Whenever you are inside a complex menu (Poké Mart shop, Bag, Pokémon party menu, PC, Yes/No choice, Move-learn prompt), in an unfamiliar room, or when local pathfinding is blocked/stuck, set `intent: 'RAW_BUTTONS'` and provide 1 to 5 exact buttons in `actions` (e.g. `["A"]`, `["DOWN", "A"]`, `["B", "B"]`, `["LEFT", "UP", "UP"]`).
+   - `WAIT`: Pause 1 turn for screen animation.
 
-### Output Style:
-- intent: NavigationIntent (e.g. 'EXIT_ROOM', 'GO_TO_POI', 'ADVANCE_DIALOGUE', 'EXPLORE_NORTH', 'BATTLE_ACTION')
-- target_poi: Specific POI or warp name (or null)
-- dialogue_text: Exact transcribed text from on-screen speech bubble (or null)
-- battle_action: 'FIGHT', 'BAG', 'SWITCH_POKEMON', or 'RUN' (when in battle)
-- move_slot: 1 to 4 (when battle_action is 'FIGHT')
-- reasoning: 3 to 6 words explaining the plan
-- micro_step: 3 to 8 words describing immediate physical milestone
-- thought: 1 sentence for stream TTS commentary"""
+2. Quest & Dialogue Rules:
+   - Follow `[CURRENT TOP-PRIORITY QUEST]` and `- Walkthrough Guide:` in Session Memory.
+   - NEVER re-add or repeat a milestone listed in `Completed Milestones (DO NOT REPEAT)`.
+   - When an NPC gives a new uncompleted quest, set `new_quest`. When you fulfill the current quest, set `completed_quest`.
+   - Always populate `actions` with 1-4 sensible fallback GBA buttons (`UP`, `DOWN`, `LEFT`, `RIGHT`, `A`, `B`, `START`, `SELECT`) in case local pathfinding is blocked."""
+
+BATTLE_SYSTEM_SUPPLEMENT = """
+### Battle Strategy & Type Matchup Rules:
+- `battle_action`: 'FIGHT' (attack with `move_slot` 1..4), 'BAG' (`target_item`: 'POKE_BALL' or 'POTION'), 'SWITCH_POKEMON' (`switch_target_slot` 1..6), or 'RUN' (flee wild battle).
+- NEVER select a move with 0 PP (`PP 0/xx`)!
+- Type Immunities (0x Damage): Ground (Geodude, Onix, Diglett, Sandshrew) is 100% IMMUNE to Electric (ThunderShock)! Ghost is immune to Normal/Fighting. Flying is immune to Ground.
+- Super-Effective (2x): Electric -> Water/Flying; Water/Grass/Fighting -> Rock/Ground; Fire/Flying/Ice/Psychic -> Grass/Bug."""
 
 BATTLE_TACTICAL_GUIDANCE = """[BATTLE TACTICAL CONSULTATION - ENEMY ENCOUNTER / SWITCH]:
 A new battle has started or an enemy Pokémon has switched on screen!
@@ -175,6 +159,13 @@ A new battle has started or an enemy Pokémon has switched on screen!
 4. State your 2-3 step gameplan in 'micro_step' so subsequent turns can execute swiftly!"""
 
 
+def get_system_instruction(is_battle: bool = False) -> str:
+    """Returns context-sliced system instruction (compact for overworld, full type rules for battle)."""
+    if is_battle:
+        return f"{SYSTEM_INSTRUCTION}\n{BATTLE_SYSTEM_SUPPLEMENT}"
+    return SYSTEM_INSTRUCTION
+
+
 def build_turn_prompt(
     turn_id: int,
     memory_context: str = "",
@@ -188,14 +179,14 @@ def build_turn_prompt(
     sections = [f"Turn: {turn_id}"]
 
     if active_quest:
-        sections.append(f"[CURRENT TOP-PRIORITY QUEST]: >>> {active_quest} <<<\nPrioritize fulfilling this directive before continuing onward!")
+        sections.append(f"[CURRENT TOP-PRIORITY QUEST]: >>> {active_quest} <<<")
         if "oak's parcel" in active_quest.lower() and "pallet town" in active_quest.lower():
-            sections.append("[OAK'S PARCEL RETURN DIRECTIVE]: You are currently carrying Oak's Parcel in Viridian City! You MUST walk SOUTH out of Viridian City onto Route 1 and hop down the ledges to Pallet Town to deliver it to Professor Oak. Do NOT head north, do NOT enter the Mart or Poké Center, and choose `intent: 'EXPLORE_SOUTH'`!")
+            sections.append("[OAK'S PARCEL RETURN DIRECTIVE]: Walk SOUTH out of Viridian City onto Route 1 and hop down the ledges to Pallet Town (`EXPLORE_SOUTH`), then enter Oak's Lab in southeast Pallet Town.")
 
     if battle_advisor_prompt:
         sections.append(battle_advisor_prompt)
     elif mode_hint:
-        sections.append(f"[CURRENT SCREEN CONTEXT & DETECTED POIS]:\n{mode_hint}")
+        sections.append(f"[SCREEN CONTEXT & DETECTED POIS]:\n{mode_hint}")
 
     if stuck_alert:
         sections.append(stuck_alert)
@@ -206,7 +197,8 @@ def build_turn_prompt(
     if memory_context:
         sections.append(memory_context)
 
-    sections.append("Analyze the screenshot. Pick your high-level intent (`intent`), target POI, or battle strategy to advance gameplay.")
+    sections.append("Choose `intent`, `target_poi` (or `battle_action`), and `actions` (1-4 fallback GBA buttons).")
 
     return "\n\n".join(sections)
+
 

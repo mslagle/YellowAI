@@ -56,6 +56,79 @@ class MovementController:
         self.screen_capture = screen_capture
         self.step_settle_delay = step_settle_delay
         self.route_debug_path = route_debug_path
+        # Ego-centric / grid-coordinate empirical obstacle cache: (col, row) -> remaining TTL turns
+        self.empirical_obstacles: Dict[Tuple[int, int], int] = {}
+        self._last_area_type: Optional[str] = None
+
+    def clear_empirical_obstacles(self):
+        """Clears learned empirical obstacles (called on room/map warps)."""
+        self.empirical_obstacles.clear()
+
+    def record_blocked_step(
+        self,
+        player_tile: Tuple[int, int],
+        direction_btn: str,
+        ttl: int = 8
+    ) -> Optional[Tuple[int, int]]:
+        """
+        Records that stepping in `direction_btn` from `player_tile` was physically blocked
+        (e.g., an unseen NPC, ledge, sign, or roof eave that RGB heuristics marked walkable).
+        """
+        vectors = {
+            "UP": (0, -1),
+            "DOWN": (0, 1),
+            "LEFT": (-1, 0),
+            "RIGHT": (1, 0)
+        }
+        vec = vectors.get((direction_btn or "").upper().strip())
+        if not vec:
+            return None
+        bc = player_tile[0] + vec[0]
+        br = player_tile[1] + vec[1]
+        if 0 <= bc < GRID_COLS and 0 <= br < GRID_ROWS:
+            self.empirical_obstacles[(bc, br)] = max(ttl, self.empirical_obstacles.get((bc, br), 0))
+            return (bc, br)
+        return None
+
+    def shift_empirical_obstacles(self, direction_btn: str, camera_scrolled: bool = True):
+        """
+        Updates empirical obstacle coordinates after a successful step and decays TTLs.
+        When camera_scrolled is True (standard overworld camera locked to Red), obstacles shift
+        opposite to Red's movement vector.
+        """
+        if not self.empirical_obstacles:
+            return
+        vectors = {
+            "UP": (0, -1),
+            "DOWN": (0, 1),
+            "LEFT": (-1, 0),
+            "RIGHT": (1, 0)
+        }
+        dx, dy = vectors.get((direction_btn or "").upper().strip(), (0, 0))
+        updated: Dict[Tuple[int, int], int] = {}
+        for (oc, or_), ttl in self.empirical_obstacles.items():
+            if ttl <= 1:
+                continue
+            nc = (oc - dx) if camera_scrolled else oc
+            nr = (or_ - dy) if camera_scrolled else or_
+            if 0 <= nc < GRID_COLS and 0 <= nr < GRID_ROWS:
+                updated[(nc, nr)] = ttl - 1
+        self.empirical_obstacles = updated
+
+    def get_effective_grid(self, scene: SceneAnalysis) -> np.ndarray:
+        """Overlays learned empirical obstacles onto a copy of scene.collision_grid."""
+        grid = scene.collision_grid.copy()
+        if not self.empirical_obstacles:
+            return grid
+        p_tile = (scene.player.tile_col, scene.player.tile_row) if scene.player.detected else None
+        for (oc, or_), ttl in list(self.empirical_obstacles.items()):
+            if ttl <= 0:
+                continue
+            if p_tile and (oc, or_) == p_tile:
+                continue
+            if 0 <= oc < GRID_COLS and 0 <= or_ < GRID_ROWS and grid[or_, oc] == CELL_WALKABLE:
+                grid[or_, oc] = CELL_OBSTACLE
+        return grid
 
     # -------------------------------------------------------------------------
     # Pathfinding (A* on 15x10 Collision Grid)
@@ -129,7 +202,8 @@ class MovementController:
         self,
         intent: str,
         target_poi_name: Optional[str],
-        scene: SceneAnalysis
+        scene: SceneAnalysis,
+        effective_grid: Optional[np.ndarray] = None
     ) -> Optional[Tuple[int, int, str]]:
         """
         Resolves the target tile (col, row) and label based on the high-level intent and scene state.
@@ -139,6 +213,7 @@ class MovementController:
         p = scene.player
         if not p.detected:
             return None
+        active_grid = effective_grid if effective_grid is not None else scene.collision_grid
 
         # 1. EXIT_ROOM: Target the primary warp exit in the room
         if intent == "EXIT_ROOM":
@@ -161,6 +236,8 @@ class MovementController:
                 return 7, 8, "CENTER_EXIT"
             elif scene.area_type == "POKEMART":
                 return 4, 8, "MART_EXIT"
+            elif scene.area_type in ("GENERIC_INDOOR", "GYM"):
+                return 7, 8, "ROOM_EXIT"
 
         # 2. Explicit target_poi_name lookup (works across GO_TO_POI, TALK_TO_NPC, ENTER_BUILDING, and EXPLORE_*)
         if target_poi_name:
@@ -186,7 +263,7 @@ class MovementController:
                 for poi in scene.pois:
                     if poi.name == "OAKS_LAB":
                         return poi.interaction_tile[0], poi.interaction_tile[1], poi.name
-                return self._find_furthest_walkable_tile("SOUTHEAST", (p.tile_col, p.tile_row), scene.collision_grid)
+                return self._find_furthest_walkable_tile("SOUTHEAST", (p.tile_col, p.tile_row), active_grid)
             if scene.area_type == "OVERWORLD" and any(k in t_upper for k in ["MOM", "RED", "HOME"]):
                 house_doors = [poi for poi in scene.pois if poi.name == "BUILDING_DOOR"]
                 if house_doors:
@@ -217,7 +294,7 @@ class MovementController:
                 for poi in scene.pois:
                     if poi.name == "OAKS_LAB":
                         return poi.interaction_tile[0], poi.interaction_tile[1], poi.name
-            return self._find_furthest_walkable_tile(direction, (p.tile_col, p.tile_row), scene.collision_grid)
+            return self._find_furthest_walkable_tile(direction, (p.tile_col, p.tile_row), active_grid)
 
         # 4. ENTER_BUILDING / GO_TO_POI fallback:
         # Inside OAKS_LAB / POKECENTER / POKEMART, never default a generic GO_TO_POI / ENTER_BUILDING to the room's exit door!
@@ -230,7 +307,7 @@ class MovementController:
                 if poi.category == "WARP":
                     return poi.interaction_tile[0], poi.interaction_tile[1], poi.name
             # Fallback to directional exploration
-            return self._find_furthest_walkable_tile("SOUTH", (p.tile_col, p.tile_row), scene.collision_grid)
+            return self._find_furthest_walkable_tile("SOUTH", (p.tile_col, p.tile_row), active_grid)
 
         return None
 
@@ -521,11 +598,27 @@ class MovementController:
         """
         Full motor execution pipeline:
         1. Resolves target destination tile.
-        2. Computes A* collision-free path.
+        2. Computes A* collision-free path (with empirical obstacle overlay).
         3. Converts to GBA button sequence.
         4. Saves visual route map to `logs/last_route_planned.png`.
         5. Executes buttons sequentially with reactive interrupts.
         """
+        if self._last_area_type and self._last_area_type != scene.area_type:
+            self.clear_empirical_obstacles()
+        self._last_area_type = scene.area_type
+
+        if (intent or "").upper().strip() == "RAW_BUTTONS":
+            return {
+                "success": False,
+                "target": "RAW_BUTTONS",
+                "path_length": 0,
+                "planned_buttons": [],
+                "executed_buttons": [],
+                "interrupted": False,
+                "interrupt_reason": None,
+                "status": "RAW_BUTTONS_PASSTHROUGH"
+            }
+
         # Immediate UI screen / dialogue advance handling (regardless of player detection)
         if scene.area_type == "NAMING_SCREEN":
             naming_btns = ["B", "START", "A"]
@@ -588,24 +681,25 @@ class MovementController:
 
         p = scene.player
         if not p.detected:
-            return {"success": False, "buttons": [], "status": "PLAYER_NOT_DETECTED"}
+            return {"success": False, "buttons": [], "planned_buttons": [], "executed_buttons": [], "status": "PLAYER_NOT_DETECTED"}
 
         start_tile = (p.tile_col, p.tile_row)
-        resolved = self.resolve_target_tile(intent, target_poi_name, scene)
+        effective_grid = self.get_effective_grid(scene)
+        resolved = self.resolve_target_tile(intent, target_poi_name, scene, effective_grid=effective_grid)
 
         if not resolved:
-            return {"success": False, "buttons": [], "status": f"COULD_NOT_RESOLVE_{intent}"}
+            return {"success": False, "buttons": [], "planned_buttons": [], "executed_buttons": [], "status": f"COULD_NOT_RESOLVE_{intent}"}
 
         goal_c, goal_r, target_name = resolved
         goal_tile = (goal_c, goal_r)
 
-        # Compute collision-free path via A*
-        path = self.find_path(scene.collision_grid, start_tile, goal_tile)
+        # Compute collision-free path via A* using effective_grid (which includes empirical obstacles)
+        path = self.find_path(effective_grid, start_tile, goal_tile)
         if not path:
             # If direct path blocked, attempt adjacent tile
             for dc, dr in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
                 adj = (goal_c + dc, goal_r + dr)
-                path = self.find_path(scene.collision_grid, start_tile, adj)
+                path = self.find_path(effective_grid, start_tile, adj)
                 if path:
                     goal_tile = adj
                     break
@@ -654,7 +748,7 @@ class MovementController:
             buttons.append("UP")
         elif (
             matched_poi is not None
-            and matched_poi.name in ("FRONT_DOOR", "MART_EXIT", "CENTER_EXIT")
+            and matched_poi.name in ("FRONT_DOOR", "MART_EXIT", "CENTER_EXIT", "ROOM_EXIT")
             and start_tile != (matched_poi.tile_col, matched_poi.tile_row)
             and path
         ):
@@ -687,14 +781,24 @@ class MovementController:
 
         if self.input_controller and buttons:
             prev_thumb = None
+            if self.screen_capture:
+                _, prev_thumb = self.screen_capture.capture_frame()
+
+            sim_facing = p.facing
+            sim_tile = start_tile
+            camera_locked = (scene.area_type == "OVERWORLD" and start_tile == (7, 4))
+
             for idx, btn in enumerate(buttons):
                 if self.screen_capture and not self.screen_capture.is_window_alive():
                     interrupted = True
                     interrupt_reason = "EMULATOR_CLOSED"
                     break
 
+                is_turn_only = (btn in ("UP", "DOWN", "LEFT", "RIGHT") and sim_facing != "UNKNOWN" and sim_facing != btn)
                 self.input_controller.press_button(btn)
                 executed_buttons.append(btn)
+                if btn in ("UP", "DOWN", "LEFT", "RIGHT"):
+                    sim_facing = btn
                 time.sleep(self.step_settle_delay)
 
                 # Reactive visual verification
@@ -704,9 +808,23 @@ class MovementController:
                         diff = float(np.mean(np.abs(curr_thumb.astype(float) - prev_thumb.astype(float))))
                         # Scene warp (doorway / stairs / battle flash)
                         if diff >= 50.0:
+                            self.clear_empirical_obstacles()
                             interrupted = True
                             interrupt_reason = "SCENE_WARP_OR_BATTLE"
                             break
+                        elif btn in ("UP", "DOWN", "LEFT", "RIGHT") and not is_turn_only:
+                            if diff < 0.35:
+                                # Step was physically blocked! Record in empirical obstacle cache
+                                self.record_blocked_step(sim_tile, btn)
+                                interrupted = True
+                                interrupt_reason = "STEP_BLOCKED_BY_OBSTACLE"
+                                break
+                            else:
+                                self.shift_empirical_obstacles(btn, camera_scrolled=camera_locked)
+                                if not camera_locked:
+                                    vecs = {"UP": (0, -1), "DOWN": (0, 1), "LEFT": (-1, 0), "RIGHT": (1, 0)}
+                                    dc, dr = vecs[btn]
+                                    sim_tile = (sim_tile[0] + dc, sim_tile[1] + dr)
                     prev_thumb = curr_thumb
 
             # If we stepped into a doorway/warp or triggered a scene warp, wait for the GBA door-sliding

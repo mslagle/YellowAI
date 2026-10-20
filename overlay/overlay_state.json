@@ -1,39 +1,15 @@
 {
-  "turn": 6,
-  "last_action": "WAIT",
-  "latest_thought": "Entering the Mart to restock Pok\u00e9 Balls and Potions!",
-  "priority_quest": "Head South to Viridian City Mart for supplies",
-  "active_quest": "Head South to Viridian City Mart for supplies",
+  "turn": 0,
+  "last_action": "NONE",
+  "latest_thought": "Ready to start a fresh Pok\u00e9mon Yellow Recharged adventure!",
+  "priority_quest": "Leave Red's bedroom, go downstairs, and talk to Mom",
+  "active_quest": "Leave Red's bedroom, go downstairs, and talk to Mom",
   "quests": [
-    "Head SOUTH to Viridian City Pok\u00e9 Mart, purchase Pok\u00e9 Balls and Potions, and catch wild Pok\u00e9mon to build our team for future quests",
-    "Head NORTH via Route 2 and Viridian Forest to Pewter City Gym after team is equipped",
-    "Obtain Pok\u00e9dex from Professor Oak",
-    "Head South to Viridian City Mart for supplies",
-    "Head to Viridian City Mart for supplies",
-    "Exit Lab and walk NORTH into tall grass",
-    "Head South to Viridian City for supplies",
-    "Head SOUTH to Viridian City Pok\u00e9 Mart for supplies",
-    "Deliver Oak's Parcel to Professor Oak",
-    "Travel NORTH from Viridian City along Route 2 through Viridian Forest to defeat Brock at Pewter City Gym"
+    "Leave Red's bedroom, go downstairs, and talk to Mom"
   ],
-  "current_area": "Pallet Town / Kanto Overworld",
-  "team": [
-    {
-      "species": "Pikachu",
-      "level": 5,
-      "lead": true,
-      "key_moves": [
-        "ThunderShock",
-        "Growl"
-      ]
-    },
-    {
-      "species": "Pok",
-      "level": 3,
-      "lead": false,
-      "key_moves": []
-    }
-  ],
+  "completed_milestones": [],
+  "current_area": "Pallet Town (Red's Bedroom)",
+  "team": [],
   "supplies": {
     "poke_balls": 0,
     "potions": 0,
@@ -41,19 +17,13 @@
     "money": 3000
   },
   "badges": 0,
-  "micro_step": "Enter Mart building entrance.",
-  "short_term_memory": "Red is standing outside Oak's Lab in Pallet Town. The immediate goal is to enter the Mart building to purchase Pok\u00e9 Balls and Potions, as we currently have zero of both.",
-  "medium_term_memory": "We are currently in Pallet Town. We have just completed the initial setup with Oak and need to ensure we have supplies before heading north to Viridian City.",
-  "long_term_memory": "The playthrough is in early stages of Kanto. We have caught Pikachu and a second Pok\u00e9mon but have zero Pok\u00e9 Balls or Potions. The primary objective is to stock up at the Mart before tackling Route 2 and the Gym challenges.",
+  "micro_step": "Walk UP and RIGHT to staircase in top-right corner to go downstairs",
+  "short_term_memory": "Just started a fresh game in Red's bedroom (2F upstairs). Need to walk UP and RIGHT to the staircase in the top-right corner to go downstairs.",
+  "medium_term_memory": "Pallet Town: Go downstairs, talk to Mom, head outside, meet Professor Oak, choose starter Pok\u00e9mon, and defeat Rival.",
+  "long_term_memory": "Grand Goal: Defeat all 8 Kanto Gym Leaders, conquer the Elite Four, and become Pok\u00e9mon Champion.",
   "knowledge_notes": [
-    "Dialogue: We hope you excel!",
-    "Dialogue: Welcome to our Pok\u00e9mon Center!",
-    "Dialogue: Would you like me to heal your Pok\u00e9mon back to",
-    "Dialogue: Okay, I'll take your Pok\u00e9mon for a few seco",
-    "Dialogue: We've restored your Pok\u00e9mon to full health.",
-    "Dialogue: We hope to see you again!",
-    "Dialogue: Would you like me to heal your Pok\u00e9mon back to perfect health?",
-    "Dialogue: Oak: Here is your Pok\u00e9dex! Welcome to the Kanto region!"
+    "Yellow Recharged: Pok\u00e9 Balls available immediately at Viridian Mart with no parcel required to unlock."
   ],
-  "timestamp": 1791808745.0828936
+  "dialogue_history": [],
+  "timestamp": 1792413936.2093713
 }

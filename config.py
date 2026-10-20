@@ -35,8 +35,14 @@ EMULATOR_WINDOW_TITLE_KEYWORDS = ["mGBA", "Recharged", "Yellow", "Pokemon", "Pok
 CAPTURE_TARGET_WIDTH = 480
 CAPTURE_TARGET_HEIGHT = 320
 
-# Model Provider Backend ("gemini" or "ollama")
-LLM_BACKEND = os.getenv("LLM_BACKEND", "gemini").lower().strip()
+# Model Provider Backend ("hybrid", "gemini", "bionic", "lmstudio", or "ollama")
+LLM_BACKEND = os.getenv("LLM_BACKEND", "hybrid").lower().strip()
+
+# Hybrid Mode Configuration (used when LLM_BACKEND="hybrid")
+HYBRID_LOCAL_BACKEND = os.getenv("HYBRID_LOCAL_BACKEND", "bionic").lower().strip()  # "bionic" or "ollama"
+HYBRID_ESCALATE_ON_STUCK_TURNS = int(os.getenv("HYBRID_ESCALATE_ON_STUCK_TURNS", "2"))
+HYBRID_ESCALATE_ON_BATTLES = os.getenv("HYBRID_ESCALATE_ON_BATTLES", "false").lower() == "true"
+HYBRID_CHECKPOINT_TURNS = int(os.getenv("HYBRID_CHECKPOINT_TURNS", "25"))  # 0 to disable periodic cloud check-in
 
 # Gemini Model Settings (Gemini 3.5 Flash)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
@@ -51,6 +57,22 @@ OLLAMA_MODEL_ID = os.getenv("OLLAMA_MODEL_ID", "qwen3.5")
 # Local Bionic / LM Studio Settings (100% Free / Port 1234)
 BIONIC_BASE_URL = os.getenv("BIONIC_BASE_URL", "http://localhost:1234/v1")
 BIONIC_MODEL_ID = os.getenv("BIONIC_MODEL_ID", "default")
+
+# Background Input & Window Focus Configuration
+# Options: "postmessage" (Win32 background messages, no focus needed),
+#          "lua_socket" (mGBA Lua bridge socket, falls back to postmessage),
+#          "foreground" (legacy SetForegroundWindow + pydirectinput)
+BACKGROUND_INPUT_MODE = os.getenv("BACKGROUND_INPUT_MODE", "postmessage").lower().strip()
+LUA_BRIDGE_HOST = os.getenv("LUA_BRIDGE_HOST", "127.0.0.1")
+LUA_BRIDGE_PORT = int(os.getenv("LUA_BRIDGE_PORT", "8888"))
+
+# Tier 0 Reflexes & Token Optimization
+ENABLE_TIER0_REFLEXES = os.getenv("ENABLE_TIER0_REFLEXES", "true").lower() == "true"
+SEND_PREVIOUS_IMAGE_ONLY_WHEN_STUCK = os.getenv("SEND_PREVIOUS_IMAGE_ONLY_WHEN_STUCK", "true").lower() == "true"
+
+# Rolling Dialogue Log Settings
+MAX_DIALOGUE_HISTORY = int(os.getenv("MAX_DIALOGUE_HISTORY", "20"))
+DIALOGUE_PROMPT_RECENT_COUNT = int(os.getenv("DIALOGUE_PROMPT_RECENT_COUNT", "4"))
 
 # Turn Timing and Delays (in seconds)
 BUTTON_HOLD_DURATION = float(os.getenv("BUTTON_HOLD_DURATION", "0.05"))  # ~3 frames hold at 60fps (~16.7ms/frame)

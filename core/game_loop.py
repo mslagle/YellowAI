@@ -14,6 +14,7 @@ from config import (
     BUTTON_HOLD_DURATION,
     STEP_SETTLE_DELAY,
     TURN_SETTLE_DELAY,
+    MAX_BATCH_ACTIONS,
     ANTI_STUCK_CONSECUTIVE_THRESHOLD,
     OVERLAY_DIR,
     OVERLAY_PORT,
@@ -24,6 +25,7 @@ from config import (
     CAPTURE_TARGET_WIDTH,
     CAPTURE_TARGET_HEIGHT,
     EMULATOR_WINDOW_TITLE_KEYWORDS,
+    GEMINI_API_KEY,
     GEMINI_THINKING_BUDGET,
     LAST_CAPTURE_FILE,
     PREVIOUS_CAPTURE_FILE,
@@ -35,6 +37,11 @@ from config import (
     ENABLE_BATTLE_THINKING,
     BATTLE_THINKING_BUDGET,
     LLM_BACKEND,
+    HYBRID_LOCAL_BACKEND,
+    HYBRID_ESCALATE_ON_STUCK_TURNS,
+    HYBRID_ESCALATE_ON_BATTLES,
+    HYBRID_CHECKPOINT_TURNS,
+    ENABLE_TIER0_REFLEXES,
     OLLAMA_BASE_URL,
     OLLAMA_MODEL_ID,
     BIONIC_BASE_URL,
@@ -44,7 +51,7 @@ from emulator.screen_capture import ScreenCapture
 from emulator.input_controller import InputController
 from agent.gemini_player import GeminiPlayer
 from agent.prompts import BATTLE_TACTICAL_GUIDANCE
-from core.memory_manager import MemoryManager
+from core.memory_manager import MemoryManager, STORYLINE_MILESTONES
 from core.anti_stuck import AntiStuckWatchdog, OPPOSITE_DIRECTIONS
 from core.screen_analyzer import ScreenAnalyzer
 from core.movement_controller import MovementController
@@ -52,6 +59,9 @@ from core.battle_controller import BattleController
 from core.logger import log_file_only
 from tts.audio_queue import AudioQueueManager
 from overlay.server import OverlayServer
+from typing import Tuple, Any, Dict
+from PIL import Image
+
 
 class GameLoop:
     def __init__(
@@ -85,28 +95,57 @@ class GameLoop:
             hold_duration=BUTTON_HOLD_DURATION
         )
         self.memory_manager = MemoryManager(storage_path=MEMORY_FILE)
-        
-        # Select active AI player backend (Local Bionic vs Local Ollama vs Cloud Gemini)
-        if self.backend in ["bionic", "lmstudio"]:
+
+        effective_api_key = api_key or GEMINI_API_KEY
+        self.escalation_player = None
+
+        # Select active AI player backend (Hybrid Local+Cloud vs Local Bionic vs Local Ollama vs Cloud Gemini)
+        if self.backend == "hybrid":
+            local_choice = (HYBRID_LOCAL_BACKEND or "bionic").lower().strip()
+            if local_choice == "ollama":
+                from agent.ollama_player import OllamaPlayer
+                self.gemini_player = OllamaPlayer(
+                    base_url=ollama_base_url,
+                    model_id=ollama_model_id
+                )
+            else:
+                from agent.bionic_player import BionicPlayer
+                self.gemini_player = BionicPlayer(
+                    base_url=bionic_base_url,
+                    model_id=bionic_model_id
+                )
+            if effective_api_key:
+                self.escalation_player = GeminiPlayer(
+                    api_key=effective_api_key,
+                    model_id=model_id,
+                    thinking_budget=thinking_budget
+                )
+            else:
+                self.escalation_player = self.gemini_player
+        elif self.backend in ["bionic", "lmstudio"]:
             from agent.bionic_player import BionicPlayer
             self.gemini_player = BionicPlayer(
                 base_url=bionic_base_url,
                 model_id=bionic_model_id
             )
+            self.escalation_player = self.gemini_player
         elif self.backend == "ollama":
             from agent.ollama_player import OllamaPlayer
             self.gemini_player = OllamaPlayer(
                 base_url=ollama_base_url,
                 model_id=ollama_model_id
             )
+            self.escalation_player = self.gemini_player
         else:
             self.gemini_player = GeminiPlayer(
-                api_key=api_key,
+                api_key=effective_api_key,
                 model_id=model_id,
                 thinking_budget=thinking_budget
             )
+            self.escalation_player = self.gemini_player
+
         self.anti_stuck = AntiStuckWatchdog(threshold_consecutive=ANTI_STUCK_CONSECUTIVE_THRESHOLD)
-        
+
         # Dual-Tier Perception & Movement Controllers
         self.screen_analyzer = ScreenAnalyzer(
             target_width=CAPTURE_TARGET_WIDTH,
@@ -122,10 +161,10 @@ class GameLoop:
         self.battle_controller = BattleController(
             input_controller=self.input_controller
         )
-        
+
         self.enable_tts = enable_tts
         self.audio_queue = AudioQueueManager() if enable_tts else None
-        
+
         self.overlay_server = OverlayServer(OVERLAY_DIR, OVERLAY_PORT) if ENABLE_OVERLAY_SERVER else None
 
         # Battle state tracking for tactical thinking on encounter/switch
@@ -136,6 +175,34 @@ class GameLoop:
         self.last_facing_direction: Optional[str] = None
         self.consecutive_dialogue_turns: int = 0
         self.last_dialogue_text: str = ""
+
+    def _select_player_for_turn(self, scene: Any, mode_hint: str) -> Tuple[Any, Optional[str]]:
+        """
+        In 'hybrid' mode, selects whether to use the fast 0-cost local VLM or escalate
+        to Cloud Gemini (when stuck, in complex menus/gyms, or on periodic checkpoints).
+        """
+        if self.backend != "hybrid" or self.escalation_player is None or self.escalation_player is self.gemini_player:
+            return self.gemini_player, None
+
+        if self.anti_stuck.consecutive_stuck_turns >= HYBRID_ESCALATE_ON_STUCK_TURNS:
+            return self.escalation_player, f"STUCK_{self.anti_stuck.consecutive_stuck_turns}_TURNS"
+
+        if getattr(self.gemini_player, "consecutive_errors", 0) >= 2:
+            return self.escalation_player, "LOCAL_MODEL_ERROR_FALLBACK"
+
+        if scene.area_type in ("GENERIC_INDOOR", "GYM"):
+            return self.escalation_player, f"COMPLEX_ROOM_{scene.area_type}"
+
+        if "SHOP MENU IS OPEN" in mode_hint or "START MENU IS OPEN" in mode_hint:
+            return self.escalation_player, "ACTIVE_MENU_NAVIGATION"
+
+        if HYBRID_ESCALATE_ON_BATTLES and scene.is_battle:
+            return self.escalation_player, "BATTLE_ESCALATION"
+
+        if HYBRID_CHECKPOINT_TURNS > 0 and self.turn_id > 0 and (self.turn_id % HYBRID_CHECKPOINT_TURNS == 0):
+            return self.escalation_player, f"PERIODIC_CHECKPOINT_T{self.turn_id}"
+
+        return self.gemini_player, None
 
     def _is_naming_screen(self, frame: Image.Image) -> bool:
         """Visual check for the GBA Gen 3 / Recharged Yellow naming keyboard screen in all modes (Upper/Lower/Symbols)."""
@@ -154,7 +221,7 @@ class GameLoop:
             return False
 
     def _detect_screen_mode(self, frame: Image.Image) -> Tuple[Any, str]:
-        """Analyzes frame via NumPy ScreenAnalyzer and generates grounded prompt with POIs."""
+        """Analyzes frame via NumPy ScreenAnalyzer, syncs canonical milestone tombstones, and generates grounded prompt."""
         scene = self.screen_analyzer.analyze(frame, current_area_hint=self.memory_manager.current_area)
         if scene.area_type == "OVERWORLD":
             cur_lower = (self.memory_manager.current_area or "").lower()
@@ -167,44 +234,37 @@ class GameLoop:
         if ("PIKACHU_FOLLOWING" in notes_joined or "STARTER_ALREADY_CLAIMED" in notes_joined) and not self.memory_manager.team:
             self.memory_manager.apply_party_update("Received starter Pikachu Lv5")
 
-        # Transition quests upon room movement
+        # Sync canonical storyline milestone tombstones based on verified scene
+        self.memory_manager.sync_scene_milestones(
+            area_type="OUTDOOR" if scene.area_type == "OVERWORLD" else scene.area_type,
+            screen_mode="BATTLE" if scene.is_battle else "OVERWORLD"
+        )
+
+        # Check sticky tombstones instead of volatile 8-item knowledge_notes buffer!
+        has_starter = bool(self.memory_manager.team)
+        parcel_delivered = "deliver_oaks_parcel" in self.memory_manager.completed_milestones
+        has_parcel = (
+            not parcel_delivered
+            and (
+                "reach_viridian_mart" in self.memory_manager.completed_milestones
+                or any("parcel" in q.lower() for q in self.memory_manager.quests)
+                or any("parcel" in kn.lower() for kn in self.memory_manager.knowledge_notes)
+            )
+        )
         current_prio = (self.memory_manager.priority_quest or "").lower()
         current_micro = (self.memory_manager.micro_step or "").lower()
-        has_starter = bool(self.memory_manager.team)
 
-        if scene.area_type == "BEDROOM_2F" and "bedroom" not in current_prio:
-            self.memory_manager.set_priority_quest("Leave Red's bedroom, go downstairs, and talk to Mom")
+        if scene.area_type == "BEDROOM_2F" and "leave_bedroom" not in self.memory_manager.completed_milestones:
+            self.memory_manager.set_priority_quest(STORYLINE_MILESTONES[0]["title"])
         elif scene.area_type == "LIVING_ROOM_1F":
-            if not has_starter:
-                if "bedroom" in current_prio or "go downstairs" in current_prio:
-                    notes_text = " ".join(self.memory_manager.knowledge_notes).lower()
-                    if "professor oak" in notes_text or "oak" in notes_text:
-                        self.memory_manager.set_priority_quest("Exit house through front door to Pallet Town, then visit Professor Oak's Lab")
-                        self.memory_manager.update_micro_step("Exit house through the front door mat at the bottom.")
-                    else:
-                        self.memory_manager.set_priority_quest("Talk to Mom in the living room, then exit the house")
-            else:
-                for q in list(self.memory_manager.quests):
-                    if "starter" in q.lower() or "oak's lab" in q.lower():
-                        self.memory_manager.complete_quest(q)
-                if "viridian" not in current_prio and "route 1" not in current_prio:
-                    self.memory_manager.set_priority_quest("Say goodbye to Mom in the living room, then exit the house and travel NORTH along Route 1 to Viridian City")
+            if not has_starter and "talk_to_mom_and_exit_house" not in self.memory_manager.completed_milestones:
+                self.memory_manager.set_priority_quest(STORYLINE_MILESTONES[1]["title"])
+                self.memory_manager.update_micro_step("Exit house through the front door mat at the bottom.")
         elif scene.area_type == "OVERWORLD":
-            # Complete any indoor exit quest once outside in Pallet Town
-            for q in list(self.memory_manager.quests):
-                if "exit house" in q.lower() or "living room" in q.lower() or "bedroom" in q.lower():
-                    self.memory_manager.complete_quest(q)
+            is_viridian = any(p.name in ("POKECENTER_DOOR", "POKEMART_DOOR") for p in scene.pois) or "viridian" in self.memory_manager.current_area.lower()
             if has_starter:
-                for q in list(self.memory_manager.quests):
-                    if "choose starter" in q.lower() or "starter pokémon" in q.lower():
-                        self.memory_manager.complete_quest(q)
-                has_parcel = any("parcel" in q.lower() for q in self.memory_manager.quests) or any("parcel" in kn.lower() for kn in self.memory_manager.knowledge_notes)
-                parcel_delivered = any("pokedex" in kn.lower() or "pokédex" in kn.lower() or "delivered oak's parcel" in kn.lower() for kn in self.memory_manager.knowledge_notes)
-                is_viridian = any(p.name in ("POKECENTER_DOOR", "POKEMART_DOOR") for p in scene.pois) or "viridian" in self.memory_manager.current_area.lower()
-                is_pallet_exit = any(p.name == "EXITED_HOUSE_DOOR" for p in scene.pois) and not is_viridian
-
                 if has_parcel and not parcel_delivered:
-                    self.memory_manager.set_priority_quest("Deliver Oak's Parcel back to Professor Oak in Pallet Town")
+                    self.memory_manager.set_priority_quest(STORYLINE_MILESTONES[5]["title"])
                     if is_viridian:
                         self.memory_manager.set_current_area("Viridian City")
                         self.memory_manager.update_micro_step("Walk SOUTH out of Viridian City and hop down Route 1 ledges to Pallet Town.")
@@ -212,53 +272,35 @@ class GameLoop:
                         self.memory_manager.update_micro_step("Visit Professor Oak's Lab in southeast Pallet Town to deliver the parcel.")
                 elif is_viridian:
                     self.memory_manager.set_current_area("Viridian City")
-                    for q in list(self.memory_manager.quests):
-                        if "leave pallet" in q.lower() or "route 1" in q.lower() or "heal" in q.lower():
-                            self.memory_manager.complete_quest(q)
-                    if "pewter" not in current_prio and "forest" not in current_prio and "brock" not in current_prio:
-                        self.memory_manager.set_priority_quest("Travel NORTH from Viridian City along Route 2 through Viridian Forest to defeat Brock at Pewter City Gym")
+                    if not parcel_delivered and "reach_viridian_mart" not in self.memory_manager.completed_milestones:
+                        self.memory_manager.set_priority_quest(STORYLINE_MILESTONES[4]["title"])
+                        self.memory_manager.update_micro_step("Enter the blue-roofed Poké Mart in Viridian City to collect Oak's Parcel.")
+                    elif parcel_delivered and "reach_pewter_city" not in self.memory_manager.completed_milestones:
+                        self.memory_manager.set_priority_quest(STORYLINE_MILESTONES[6]["title"])
                         self.memory_manager.update_micro_step("Walk NORTH through Viridian City to the Route 2 gatehouse.")
-                elif is_pallet_exit:
-                    for q in list(self.memory_manager.quests):
-                        if "mom" in q.lower() or "goodbye" in q.lower():
-                            self.memory_manager.complete_quest(q)
-                    self.memory_manager.set_priority_quest("Leave Pallet Town via the NORTH exit and travel NORTH along Route 1 to Viridian City")
-                    self.memory_manager.update_micro_step("Walk NORTH out of Pallet Town and follow Route 1 NORTH to Viridian City.")
             else:
-                if "bedroom" in current_prio or "living room" in current_prio or "exit house" in current_prio:
-                    self.memory_manager.set_priority_quest("Visit Professor Oak's Lab in southeast Pallet Town to choose starter Pokémon")
-                if any(k in current_micro for k in ["front door", "exit house", "starter table", "downstairs", "bedroom"]):
-                    self.memory_manager.update_micro_step("Walk southeast around the fence to Professor Oak's Lab entrance.")
+                if "trigger_oak_grass" not in self.memory_manager.completed_milestones:
+                    if any(k in current_micro for k in ["front door", "exit house", "downstairs", "bedroom"]):
+                        self.memory_manager.update_micro_step("Walk southeast to Oak's Lab or north into tall grass to meet Professor Oak.")
         elif scene.area_type == "OAKS_LAB":
-            has_parcel = any("parcel" in q.lower() for q in self.memory_manager.quests) or any("parcel" in kn.lower() for kn in self.memory_manager.knowledge_notes)
-            parcel_delivered = any("pokedex" in kn.lower() or "pokédex" in kn.lower() or "delivered oak's parcel" in kn.lower() for kn in self.memory_manager.knowledge_notes)
             if has_parcel and not parcel_delivered:
-                self.memory_manager.set_priority_quest("Talk to Professor Oak to deliver Oak's Parcel and receive the Pokédex")
+                self.memory_manager.set_priority_quest(STORYLINE_MILESTONES[5]["title"])
                 self.memory_manager.update_micro_step("Walk UP to Professor Oak and press A to deliver the parcel.")
-            elif "LAB_TABLE_EMPTY (OAK NOT HERE)" in notes_joined:
-                self.memory_manager.set_priority_quest("Exit Professor Oak's Lab and walk NORTH into the tall grass exit of Pallet Town to trigger Professor Oak")
+            elif "LAB_TABLE_EMPTY (OAK NOT HERE)" in notes_joined and not has_starter:
+                self.memory_manager.set_priority_quest(STORYLINE_MILESTONES[2]["title"])
                 self.memory_manager.update_micro_step("Walk SOUTH to LAB_EXIT to leave the empty Lab, then walk NORTH to the tall grass exit of Pallet Town.")
             elif "STARTER_ALREADY_CLAIMED" in notes_joined or has_starter:
-                for q in list(self.memory_manager.quests):
-                    if "choose" in q.lower() or "starter" in q.lower():
-                        self.memory_manager.complete_quest(q)
-                self.memory_manager.set_priority_quest("Exit Professor Oak's Lab and travel NORTH via Route 1, Route 2, and Viridian Forest to defeat Brock at Pewter City Gym")
+                self.memory_manager.mark_milestone_completed("claim_pikachu_and_beat_rival")
                 self.memory_manager.update_micro_step("Walk SOUTH to LAB_EXIT to exit Professor Oak's Lab into Pallet Town.")
             elif not has_starter:
-                self.memory_manager.set_priority_quest("Approach the Starter Table in Professor Oak's Lab and press A on the Poké Ball to claim Starter Pikachu")
+                self.memory_manager.mark_milestone_completed("trigger_oak_grass")
+                self.memory_manager.set_priority_quest(STORYLINE_MILESTONES[3]["title"])
                 if any(k in current_micro for k in ["southeast", "door", "entrance", "outside", "pallet", "tall grass"]):
                     self.memory_manager.update_micro_step("Walk to STARTER_TABLE on the right and press A to claim Starter Pikachu.")
-        elif scene.area_type == "POKECENTER":
-            for q in list(self.memory_manager.quests):
-                if "travel north" in q.lower() or "leave pallet" in q.lower() or "route 1" in q.lower():
-                    self.memory_manager.complete_quest(q)
-            if "heal" not in current_prio and "pewter" not in current_prio and "brock" not in current_prio and "parcel" not in current_prio:
-                self.memory_manager.set_priority_quest("Heal Pikachu with Nurse Joy, then head NORTH via Route 2 and Viridian Forest to Pewter City Gym")
-                self.memory_manager.update_micro_step("Talk to Nurse Joy at the counter to heal, then exit the Pokémon Center.")
         elif scene.area_type == "POKEMART":
-            for q in list(self.memory_manager.quests):
-                if "travel north" in q.lower() or "route 1" in q.lower():
-                    self.memory_manager.complete_quest(q)
+            if not parcel_delivered and "reach_viridian_mart" not in self.memory_manager.completed_milestones:
+                self.memory_manager.mark_milestone_completed("reach_viridian_mart")
+                self.memory_manager.set_priority_quest(STORYLINE_MILESTONES[5]["title"])
 
         if scene.is_bag_menu or scene.area_type == "BAG_MENU":
             if scene.bag_items_empty:
@@ -289,6 +331,7 @@ class GameLoop:
             "priority_quest": self.memory_manager.priority_quest or "",
             "active_quest": self.memory_manager.priority_quest or "",
             "quests": self.memory_manager.quests,
+            "completed_milestones": self.memory_manager.completed_milestones,
             "current_area": self.memory_manager.current_area,
             "team": self.memory_manager.team,
             "supplies": self.memory_manager.supplies,
@@ -298,6 +341,7 @@ class GameLoop:
             "medium_term_memory": self.memory_manager.medium_term_memory,
             "long_term_memory": self.memory_manager.long_term_memory,
             "knowledge_notes": self.memory_manager.knowledge_notes,
+            "dialogue_history": self.memory_manager.dialogue_history[-6:],
             "timestamp": time.time()
         }
         try:
@@ -311,7 +355,10 @@ class GameLoop:
         Executes the master game loop.
         Strict Guarantee: Gemini API is NEVER called unless mGBA is actively running and visible.
         """
-        if self.backend in ["bionic", "lmstudio"]:
+        if self.backend == "hybrid":
+            esc_name = getattr(self.escalation_player, "model_id", "none")
+            backend_info = f"Hybrid [Local: {self.gemini_player.model_id} | Cloud Escalation: {esc_name}]"
+        elif self.backend in ["bionic", "lmstudio"]:
             backend_info = f"Local Bionic / LM Studio [{self.gemini_player.model_id}]"
         elif self.backend == "ollama":
             backend_info = f"Local Ollama [{self.gemini_player.model_id}]"
@@ -383,6 +430,7 @@ class GameLoop:
 
                 self.turn_id += 1
                 start_time = time.time()
+                api_duration = 0.0
 
                 print(f"\n--- [TURN {self.turn_id}] ---")
 
@@ -394,32 +442,86 @@ class GameLoop:
                 repeated_a, repeat_alert = self.anti_stuck.check_repeated_action("A", threshold=3)
                 if repeated_a and repeat_alert:
                     stuck_alert = f"{stuck_alert}\n{repeat_alert}" if stuck_alert else repeat_alert
-                    log_file_only(f"[Watchdog Notice] Repeated dialogue/action loop detected. Alerting Gemini.")
+                    log_file_only("[Watchdog Notice] Repeated dialogue/action loop detected. Alerting model.")
 
                 action_history_prompt = self.anti_stuck.get_action_history_prompt()
                 if is_stuck and stuck_alert:
                     log_file_only(f"[Watchdog Alert]: {stuck_alert}")
 
-                # 6. Assemble memory context
-                memory_prompt = self.memory_manager.get_memory_context_prompt()
-
-                memory_changed_items: List[str] = []
+                # 6. Analyze screen via NumPy ScreenAnalyzer first so scene is always available
+                scene, mode_hint = self._detect_screen_mode(frame)
 
                 # Check if Last-Ditch Effort / Tactical Rescue is triggered
                 is_rescue, rescue_reason = self.anti_stuck.is_rescue_needed(
                     rescue_threshold=RESCUE_STUCK_THRESHOLD
                 )
 
-                if ENABLE_RESCUE_THINKING and is_rescue:
+                # Assemble memory context (use full 20-entry dialogue log when stuck or in rescue)
+                use_full_dialogue = bool(is_stuck or is_rescue or self.anti_stuck.consecutive_stuck_turns >= 2)
+                memory_prompt = self.memory_manager.get_memory_context_prompt(full_dialogue=use_full_dialogue)
+                memory_changed_items: List[str] = []
+
+                intent = "EXIT_ROOM"
+                target_poi = None
+                dialogue_text = None
+                battle_action = None
+                move_slot = None
+                target_item = None
+                switch_target_slot = None
+                reasoning = ""
+                thought = None
+                cadence = "CADENCE_STANDARD"
+                trigger_battle_thinking = False
+
+                # 7A. Tier 0 Reflexes (Zero LLM calls for unambiguous UI screens)
+                if ENABLE_TIER0_REFLEXES and (is_naming or scene.is_naming_screen or scene.area_type == "NAMING_SCREEN"):
+                    intent = "RAW_BUTTONS"
+                    reasoning = "Tier 0 Reflex: Confirming default character name."
+                    decision = {
+                        "intent": "RAW_BUTTONS",
+                        "flat_actions": ["B", "START", "A"],
+                        "reasoning": reasoning,
+                        "cadence_tag": "TIER0_REFLEX"
+                    }
+                elif ENABLE_TIER0_REFLEXES and scene.area_type == "TITLE_SCREEN":
+                    intent = "ADVANCE_DIALOGUE"
+                    reasoning = "Tier 0 Reflex: Advancing title/intro screen."
+                    decision = {
+                        "intent": "ADVANCE_DIALOGUE",
+                        "flat_actions": ["A"],
+                        "reasoning": reasoning,
+                        "cadence_tag": "TIER0_REFLEX"
+                    }
+                elif ENABLE_TIER0_REFLEXES and scene.area_type == "TRAINER_CARD":
+                    intent = "EXIT_ROOM"
+                    reasoning = "Tier 0 Reflex: Closing Trainer Card."
+                    decision = {
+                        "intent": "EXIT_ROOM",
+                        "flat_actions": ["B"],
+                        "reasoning": reasoning,
+                        "cadence_tag": "TIER0_REFLEX"
+                    }
+                elif ENABLE_TIER0_REFLEXES and (scene.is_bag_menu or scene.area_type == "BAG_MENU") and scene.bag_items_empty:
+                    intent = "EXIT_ROOM"
+                    reasoning = "Tier 0 Reflex: Closing empty Bag pocket."
+                    decision = {
+                        "intent": "EXIT_ROOM",
+                        "flat_actions": ["B"],
+                        "reasoning": reasoning,
+                        "cadence_tag": "TIER0_REFLEX"
+                    }
+                # 7B. Tactical Rescue Consultation (Escalates to Cloud Gemini in hybrid/gemini mode)
+                elif ENABLE_RESCUE_THINKING and is_rescue:
                     log_file_only(f"[Tactical Rescue Triggered] Condition: {rescue_reason}")
+                    rescue_player = self.escalation_player or self.gemini_player
 
                     api_start = time.time()
-                    rescue_result = self.gemini_player.consult_tactical_rescue(
+                    rescue_result = rescue_player.consult_tactical_rescue(
                         image=frame,
                         current_area=self.memory_manager.current_area,
                         active_quest=self.memory_manager.active_quest or self.memory_manager.priority_quest or "Progress journey",
                         micro_step=self.memory_manager.micro_step or "Navigate forward",
-                        action_history=action_history_prompt,
+                        action_history=f"{action_history_prompt}\n{memory_prompt}",
                         stuck_alert=stuck_alert or "",
                         rescue_reason=rescue_reason,
                         thinking_budget=RESCUE_THINKING_BUDGET,
@@ -430,7 +532,8 @@ class GameLoop:
 
                     button = rescue_result.get("recommended_button", "B")
                     flat_actions = rescue_result.get("flat_actions", [button])
-                    reasoning = f"Rescue: {rescue_result.get('situation_analysis', '')[:50]}"
+                    intent = "RAW_BUTTONS"
+                    reasoning = f"Rescue: {rescue_result.get('situation_analysis', '')[:60]}"
                     thought = rescue_result.get("stream_thought", None)
                     cadence = rescue_result.get("cadence_tag", "TACTICAL_RESCUE")
 
@@ -439,7 +542,6 @@ class GameLoop:
                         self.memory_manager.add_knowledge_note(clues.strip())
                         memory_changed_items.append(f"Clues: {clues.strip()[:60]}")
 
-                    # Update micro-step and short-term memory with tactical breakthrough
                     new_micro = rescue_result.get("updated_micro_step")
                     if new_micro and isinstance(new_micro, str):
                         self.memory_manager.update_micro_step(new_micro.strip())
@@ -449,22 +551,18 @@ class GameLoop:
                     if rescue_plan:
                         self.memory_manager.update_short_term(f"Tactical Rescue Plan: {rescue_plan}")
 
-                    # Notify watchdog so cooldown is set and stuck counters reset
                     self.anti_stuck.notify_rescue_executed(cooldown_turns=RESCUE_COOLDOWN_TURNS)
 
                     decision = {
+                        "intent": "RAW_BUTTONS",
                         "button": button,
                         "flat_actions": flat_actions,
                         "reasoning": reasoning,
                         "thought": thought,
                         "cadence_tag": cadence
                     }
+                # 7C. Standard VLM Turn (with Hybrid Local -> Cloud Escalation)
                 else:
-                    # 7. Analyze screen via NumPy ScreenAnalyzer and build grounded prompt
-                    scene, mode_hint = self._detect_screen_mode(frame)
-
-                    # Check for Battle Opening / Enemy Pokémon Switch Thinking Budget
-                    trigger_battle_thinking = False
                     battle_advisor_prompt = ""
                     if ENABLE_BATTLE_THINKING and (scene.is_battle or "BATTLE" in mode_hint):
                         if not self.in_battle or (self.current_opponent and self.current_opponent != self.battle_advisor_given_for_opponent):
@@ -473,8 +571,12 @@ class GameLoop:
                             opp_label = self.current_opponent or "New Encounter"
                             log_file_only(f"[Battle Strategy Triggered] Allocating {BATTLE_THINKING_BUDGET} thinking tokens for {opp_label}!")
 
+                    active_player, escalation_reason = self._select_player_for_turn(scene, mode_hint)
+                    if escalation_reason:
+                        log_file_only(f"[Hybrid Escalation] Routing Turn {self.turn_id} to Cloud Gemini ({escalation_reason})")
+
                     api_start = time.time()
-                    decision = self.gemini_player.decide_action(
+                    decision = active_player.decide_action(
                         turn_id=self.turn_id,
                         image=frame,
                         previous_image=self.previous_frame,
@@ -486,7 +588,7 @@ class GameLoop:
                         battle_thinking_budget=BATTLE_THINKING_BUDGET if trigger_battle_thinking else None,
                         battle_advisor_prompt=battle_advisor_prompt,
                         dialogue_crop=scene.dialogue_crop,
-                        emulator_verified=True  # Verified alive and visible right above!
+                        emulator_verified=True
                     )
                     api_duration = time.time() - api_start
 
@@ -504,10 +606,14 @@ class GameLoop:
                     if dialogue_text and isinstance(dialogue_text, str) and dialogue_text.strip() and dialogue_text.strip().upper() != "NULL":
                         clean_diag = dialogue_text.strip()
                         log_file_only(f"[Speech Bubble Text]: \"{clean_diag}\"")
-                        self.memory_manager.add_knowledge_note(f"Dialogue: {clean_diag}")
-                        identified_area = self.memory_manager.ingest_sign_or_dialogue_location(clean_diag)
-                        if identified_area:
-                            memory_changed_items.append(f"Oriented in '{identified_area}' via sign/dialogue")
+                        recorded = self.memory_manager.record_dialogue(
+                            turn_id=self.turn_id,
+                            text=clean_diag,
+                            area=self.memory_manager.current_area,
+                            screen_mode="BATTLE" if scene.is_battle else "OVERWORLD"
+                        )
+                        if recorded:
+                            memory_changed_items.append(f"Dialogue Logged: \"{clean_diag[:50]}\"")
 
                     log_file_only(f"Strategic Decision: Intent=[{intent}] Target=[{target_poi or 'N/A'}] | Reason: '{reasoning}' (Cadence: {cadence})")
 
@@ -576,8 +682,9 @@ class GameLoop:
                 if self.anti_stuck.doorway_warp_turns == 2:
                     self.memory_manager.save()
 
-                # 8. Execution Routing (BattleController vs MovementController vs Dialogue)
+                # 8. Execution Routing (BattleController vs MovementController vs Raw Buttons vs Dialogue)
                 executed_actions: List[str] = []
+                step_blocked_interrupted = False
 
                 if self._is_naming_screen(frame) or scene.is_naming_screen:
                     log_file_only("[Naming Screen] Confirming default name (B -> START -> A)...")
@@ -585,7 +692,7 @@ class GameLoop:
                         self.input_controller.press_button(nb)
                         time.sleep(0.25)
                     executed_actions = ["B", "START", "A"]
-                elif scene.is_bag_menu or scene.area_type == "BAG_MENU":
+                elif (scene.is_bag_menu or scene.area_type == "BAG_MENU") and intent != "RAW_BUTTONS":
                     log_file_only("[Bag Screen] In-game Bag menu is open. Pressing B to dismiss...")
                     if scene.bag_items_empty and (self.memory_manager.supplies.get("poke_balls", 0) > 0 or self.memory_manager.supplies.get("potions", 0) > 0):
                         self.memory_manager.update_supplies(poke_balls=0, potions=0)
@@ -607,6 +714,16 @@ class GameLoop:
                         frame=frame
                     )
                     executed_actions = battle_res.get("executed", [])
+                elif intent == "RAW_BUTTONS":
+                    self.consecutive_dialogue_turns = 0
+                    raw_btns = [b for b in decision.get("flat_actions", []) if b and b != "WAIT"][:MAX_BATCH_ACTIONS]
+                    if not raw_btns:
+                        raw_btns = ["B"]
+                    log_file_only(f"[Raw Buttons Execution] Pressing sequence: {raw_btns}")
+                    for rb in raw_btns:
+                        self.input_controller.press_button(rb)
+                        executed_actions.append(rb)
+                        time.sleep(self.step_settle_delay)
                 elif intent == "ADVANCE_DIALOGUE" or scene.is_dialogue:
                     clean_diag = dialogue_text.strip() if (dialogue_text and isinstance(dialogue_text, str)) else ""
                     if clean_diag and clean_diag == self.last_dialogue_text:
@@ -643,9 +760,15 @@ class GameLoop:
                     notes_joined = " ".join(scene.spatial_notes)
                     active_goal_text = f"{self.memory_manager.priority_quest or ''} {self.memory_manager.micro_step or ''} {reasoning or ''}".lower()
 
-                    # When holding Oak's Parcel to deliver to Professor Oak, do NOT re-enter Pokémon Center or Poké Mart!
-                    has_parcel_active = any("parcel" in q.lower() for q in self.memory_manager.quests) or any("parcel" in kn.lower() for kn in self.memory_manager.knowledge_notes)
-                    parcel_delivered_active = any("pokedex" in kn.lower() or "pokédex" in kn.lower() or "delivered oak's parcel" in kn.lower() for kn in self.memory_manager.knowledge_notes)
+                    # When holding Oak's Parcel to deliver to Professor Oak (and not yet tombstoned), do NOT re-enter Center or Mart!
+                    parcel_delivered_active = "deliver_oaks_parcel" in self.memory_manager.completed_milestones
+                    has_parcel_active = (
+                        not parcel_delivered_active
+                        and (
+                            "reach_viridian_mart" in self.memory_manager.completed_milestones
+                            or any("parcel" in q.lower() for q in self.memory_manager.quests)
+                        )
+                    )
                     if (
                         scene.area_type == "OVERWORLD"
                         and has_parcel_active
@@ -676,7 +799,7 @@ class GameLoop:
                             target_poi = "OAKS_LAB"
                     elif scene.area_type == "OAKS_LAB":
                         if "LAB_TABLE_EMPTY (OAK NOT HERE)" in notes_joined or "STARTER_ALREADY_CLAIMED" in notes_joined:
-                            if intent != "EXIT_ROOM":
+                            if intent != "EXIT_ROOM" and not has_parcel_active:
                                 log_file_only(f"[Lab Override] Lab table is empty / starter already claimed! Overriding {intent} ({target_poi}) -> EXIT_ROOM (Target=LAB_EXIT)")
                                 intent = "EXIT_ROOM"
                                 target_poi = "LAB_EXIT"
@@ -726,7 +849,19 @@ class GameLoop:
                     planned = move_res.get("planned_buttons", [])
                     if not executed_actions and planned:
                         executed_actions = planned
+                    step_blocked_interrupted = (move_res.get("interrupt_reason") == "STEP_BLOCKED_BY_OBSTACLE")
                     log_file_only(f"[Movement Planned]: Route={move_res.get('target', '')} ({len(planned)} buttons: {' -> '.join(planned)})")
+
+                    # Fallback to direct VLM `actions` when local pathfinding returns 0 buttons or when stuck!
+                    if not executed_actions:
+                        fallback_btns = [b for b in decision.get("flat_actions", []) if b and b != "WAIT"][:MAX_BATCH_ACTIONS]
+                        if fallback_btns:
+                            log_file_only(f"[Motor Fallback -> Direct VLM Actions]: Pathfinding returned 0 steps; executing VLM buttons {fallback_btns}")
+                            for fb in fallback_btns:
+                                self.input_controller.press_button(fb)
+                                executed_actions.append(fb)
+                                time.sleep(self.step_settle_delay)
+
                     if move_res.get("interrupt_reason") == "SCENE_WARP_OR_BATTLE":
                         time.sleep(0.6)
 
@@ -736,8 +871,13 @@ class GameLoop:
                 if fresh_frame is not None:
                     latest_frame = fresh_frame
 
-                # Record high-level intent in anti-stuck watchdog
-                self.anti_stuck.record_action(self.turn_id, intent, reasoning, outcome="MOVED")
+                # Record outcome in anti-stuck watchdog ("PENDING" allows evaluate_frame on next turn to verify pixel delta!)
+                if not executed_actions or executed_actions == ["WAIT"] or step_blocked_interrupted:
+                    recorded_outcome = "BLOCKED"
+                else:
+                    recorded_outcome = "PENDING"
+                primary_action_tag = executed_actions[0] if (intent == "RAW_BUTTONS" and executed_actions) else intent
+                self.anti_stuck.record_action(self.turn_id, primary_action_tag, reasoning, outcome=recorded_outcome)
 
                 action_summary = " -> ".join(executed_actions) if executed_actions else "WAIT"
                 if len(executed_actions) > 1:

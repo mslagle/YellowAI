@@ -14,7 +14,8 @@ from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
 
-from agent.prompts import SYSTEM_INSTRUCTION, build_turn_prompt
+import config as app_config
+from agent.prompts import SYSTEM_INSTRUCTION, get_system_instruction, build_turn_prompt
 
 
 class GBAButton(str, Enum):
@@ -45,6 +46,7 @@ class NavigationIntent(str, Enum):
     ADVANCE_DIALOGUE = "ADVANCE_DIALOGUE"# Advance/dismiss dialogue or text on screen
     OPEN_MENU = "OPEN_MENU"              # Open Start menu
     BATTLE_ACTION = "BATTLE_ACTION"      # Execute battle strategy
+    RAW_BUTTONS = "RAW_BUTTONS"          # Direct GBA button sequence for menus/shops/stuck states
     WAIT = "WAIT"
 
 
@@ -58,7 +60,11 @@ class BattleActionType(str, Enum):
 class StandardTurnResponse(BaseModel):
     intent: NavigationIntent = Field(
         default=NavigationIntent.EXIT_ROOM,
-        description="High-level intent: EXIT_ROOM, ENTER_BUILDING, GO_TO_POI, EXPLORE_NORTH, EXPLORE_SOUTH, EXPLORE_EAST, EXPLORE_WEST, EXPLORE_NORTHEAST, EXPLORE_NORTHWEST, EXPLORE_SOUTHEAST, EXPLORE_SOUTHWEST, TALK_TO_NPC, ADVANCE_DIALOGUE, BATTLE_ACTION, WAIT."
+        description="High-level intent: EXIT_ROOM, ENTER_BUILDING, GO_TO_POI, EXPLORE_NORTH, EXPLORE_SOUTH, EXPLORE_EAST, EXPLORE_WEST, EXPLORE_NORTHEAST, EXPLORE_NORTHWEST, EXPLORE_SOUTHEAST, EXPLORE_SOUTHWEST, TALK_TO_NPC, ADVANCE_DIALOGUE, BATTLE_ACTION, RAW_BUTTONS, WAIT."
+    )
+    actions: Optional[List[GBAButton]] = Field(
+        default=None,
+        description="1 to 5 GBA buttons (UP, DOWN, LEFT, RIGHT, A, B, START, SELECT) to execute directly when intent is RAW_BUTTONS or if local pathfinding is blocked."
     )
     target_poi: Optional[str] = Field(
         default=None,
@@ -255,7 +261,10 @@ class GeminiPlayer:
         )
 
         contents = []
-        if previous_image is not None:
+        include_prev = previous_image is not None and (
+            bool(stuck_alert) or not getattr(app_config, "SEND_PREVIOUS_IMAGE_ONLY_WHEN_STUCK", True)
+        )
+        if include_prev:
             prev_byte_arr = io.BytesIO()
             previous_image.save(prev_byte_arr, format='JPEG', quality=85)
             prev_part = types.Part.from_bytes(
@@ -281,8 +290,9 @@ class GeminiPlayer:
         contents.append(prompt_text)
 
         try:
+            is_battle = bool(battle_advisor_prompt) or "BATTLE" in (mode_hint or "").upper()
             config_params = {
-                "system_instruction": SYSTEM_INSTRUCTION,
+                "system_instruction": get_system_instruction(is_battle=is_battle),
                 "response_mime_type": "application/json",
                 "response_schema": schema_cls,
                 "temperature": 0.3,

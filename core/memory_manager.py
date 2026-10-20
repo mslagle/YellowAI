@@ -1,12 +1,99 @@
 """
 Memory Manager for YellowAI.
-Maintains hierarchical short, medium, and long-term memory with JSON persistence.
+Maintains hierarchical short, medium, and long-term memory with JSON persistence,
+canonical storyline milestone tracking (sticky tombstones + walkthrough hints),
+semantic quest deduplication, and a rolling NPC/sign dialogue log.
 """
 
+from difflib import SequenceMatcher
 import json
+import re
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from datetime import datetime
+import config
+
+# Canonical Kanto Storyline Milestones (Ordered DAG)
+# Provides deterministic progression tombstones and bite-sized walkthrough hints for local VLMs.
+STORYLINE_MILESTONES: List[Dict[str, Any]] = [
+    {
+        "id": "leave_bedroom",
+        "title": "Leave Red's bedroom, go downstairs, and talk to Mom",
+        "keywords": ["bedroom", "downstairs", "staircase", "2f"],
+        "walkthrough_hint": "In Red's 2F bedroom, walk UP and RIGHT to the staircase in the top-right corner to go downstairs to 1F."
+    },
+    {
+        "id": "talk_to_mom_and_exit_house",
+        "title": "Exit Mom's house via the south red exit mat into Pallet Town",
+        "keywords": ["exit mom", "leave mom", "leave house", "south exit mat", "exit house"],
+        "walkthrough_hint": "In Red's 1F living room, optionally talk to Mom at the table, then walk DOWN onto the red exit carpet at the bottom-center and press DOWN to step outside into Pallet Town."
+    },
+    {
+        "id": "trigger_oak_grass",
+        "title": "Walk NORTH into the tall grass exit of Pallet Town to trigger Professor Oak",
+        "keywords": ["trigger professor oak", "tall grass", "meet oak", "north into the tall grass", "find professor oak"],
+        "walkthrough_hint": "In Pallet Town, walk NORTH through the narrow 2-tile gap into the tall grass at the top of town. Professor Oak will automatically stop you, catch Pikachu, and escort you to his lab."
+    },
+    {
+        "id": "claim_pikachu_and_beat_rival",
+        "title": "Claim Starter Pikachu from Oak's table, defeat Rival Blue, and exit Oak's Lab",
+        "keywords": ["claim starter", "starter pikachu", "poke ball on the table", "choose starter", "defeat rival in oak"],
+        "walkthrough_hint": "Inside Oak's Lab, stand next to the Poké Ball on the table to the right of Professor Oak and press A to claim Pikachu. Then walk DOWN toward the exit to battle Rival Blue and leave the lab."
+    },
+    {
+        "id": "reach_viridian_mart",
+        "title": "Travel NORTH through Route 1 to Viridian City Poké Mart and pick up Oak's Parcel",
+        "keywords": ["viridian mart", "pick up oak", "get oak's parcel", "collect oak's parcel", "viridian city poke mart"],
+        "walkthrough_hint": "Exit Pallet Town NORTH onto Route 1, walk NORTH through Route 1 into Viridian City, and enter the blue-roofed Poké Mart on the east side to receive Oak's Parcel from the clerk."
+    },
+    {
+        "id": "deliver_oaks_parcel",
+        "title": "Deliver Oak's Parcel back to Professor Oak in Pallet Town to get the Pokédex",
+        "keywords": [
+            "deliver oak", "return oak", "oak's parcel", "oaks parcel", "parcel to oak",
+            "parcel back", "take the parcel", "return the parcel", "bring the parcel",
+            "deliver the parcel", "get the pokedex"
+        ],
+        "walkthrough_hint": "Leave Viridian Mart, walk SOUTH through Viridian City and Route 1 (hopping south over ledges) back to Pallet Town, enter Oak's Lab (southeast building), and talk to Professor Oak to hand over the Parcel and receive the Pokédex."
+    },
+    {
+        "id": "reach_pewter_city",
+        "title": "Travel NORTH through Viridian City, Route 2, and Viridian Forest to reach Pewter City",
+        "keywords": ["viridian forest", "reach pewter", "travel to pewter", "through route 2"],
+        "walkthrough_hint": "With the Pokédex obtained, walk NORTH from Pallet Town -> Route 1 -> Viridian City -> Route 2 -> Viridian Forest (follow the path to the north exit gate) -> Pewter City."
+    },
+    {
+        "id": "defeat_brock",
+        "title": "Challenge Pewter Gym and defeat Leader Brock for the Boulder Badge",
+        "keywords": ["pewter gym", "defeat brock", "leader brock", "boulder badge", "boulderbadge"],
+        "walkthrough_hint": "In Pewter City, heal at the Pokémon Center, then enter Pewter Gym (northwest building with pillars) and defeat Brock (Rock/Ground types—use Fighting, Water, Grass, or non-Electric attacks)."
+    },
+    {
+        "id": "reach_cerulean_city",
+        "title": "Travel EAST through Route 3, Mt. Moon, and Route 4 to reach Cerulean City",
+        "keywords": ["mt. moon", "mt moon", "route 3", "route 4", "reach cerulean"],
+        "walkthrough_hint": "Exit Pewter City to the EAST onto Route 3, enter Mt. Moon, defeat Team Rocket at the fossil site, exit onto Route 4, and walk EAST to Cerulean City."
+    },
+    {
+        "id": "bill_and_misty",
+        "title": "Defeat Rival on Nugget Bridge, help Bill on Route 25 for the S.S. Ticket, and beat Misty at Cerulean Gym",
+        "keywords": ["nugget bridge", "route 25", "s.s. ticket", "ss ticket", "cerulean gym", "defeat misty"],
+        "walkthrough_hint": "In Cerulean City, go NORTH across Nugget Bridge (Route 24) to Bill's cottage on Route 25 to get the S.S. Ticket, then defeat Misty at Cerulean Gym (use Pikachu's Electric moves)."
+    }
+]
+
+STOPWORDS = {
+    "the", "and", "to", "in", "of", "for", "a", "an", "on", "at", "from", "into",
+    "with", "then", "go", "walk", "head", "back", "your", "talk", "get", "reach"
+}
+
+BATTLE_SPAM_PATTERNS = [
+    " appeared!", " Go! ", " used ", "is paralyzed", "can't move",
+    "critical hit", "super effective", "not very effective", "gained ",
+    "exp. points", "fainted!", "enemy ", "foe ", "unleashed ", "missed!",
+    "stat fell", "stat rose", "defense fell", "attack fell", "speed fell",
+    "has no energy", "what will ", "do next?", "sent out ", "got away safely"
+]
 
 DEFAULT_AREA_WAYPOINTS: Dict[str, List[str]] = {
     "Pallet Town": [
@@ -58,10 +145,11 @@ class MemoryManager:
     def __init__(self, storage_path: Path):
         self.storage_path = storage_path
         self.turn_history: List[Dict[str, Any]] = []
-        
-        # Multi-quest tracking & active quest management
-        self.quests: List[str] = ["Leave Red's bedroom, go downstairs, and talk to Mom"]
-        self.priority_quest: Optional[str] = "Leave Red's bedroom, go downstairs, and talk to Mom"
+
+        # Multi-quest tracking, canonical milestone tombstones & active quest management
+        self.completed_milestones: List[str] = []
+        self.quests: List[str] = [STORYLINE_MILESTONES[0]["title"]]
+        self.priority_quest: Optional[str] = STORYLINE_MILESTONES[0]["title"]
         self.current_area: str = "Pallet Town (Red's Bedroom)"
         self.waypoints: Dict[str, List[str]] = dict(DEFAULT_AREA_WAYPOINTS)
         self.short_term_memory: str = "In Red's bedroom (2F upstairs). Need to walk UP and RIGHT to the staircase in the top-right corner to go downstairs."
@@ -73,7 +161,7 @@ class MemoryManager:
         ]
         self.micro_step: Optional[str] = "Walk UP and RIGHT to staircase in top-right corner to go downstairs"
 
-        # Structured Party, Supplies, Badges, and ROM Knowledge Notes
+        # Structured Party, Supplies, Badges, ROM Knowledge Notes, and Rolling Dialogue History
         self.team: List[Dict[str, Any]] = []
         self.supplies: Dict[str, Any] = {
             "poke_balls": 0,
@@ -86,8 +174,133 @@ class MemoryManager:
         self.knowledge_notes: List[str] = [
             "Yellow Recharged: Poké Balls available immediately at Viridian Mart with no parcel required to unlock."
         ]
-        
+        self.dialogue_history: List[Dict[str, Any]] = []
+
         self.load()
+
+    # ------------------------------------------------------------------
+    # Canonical Milestone & Semantic Deduplication Helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _tokenize_quest(text: str) -> set:
+        words = re.findall(r"[a-z0-9]+", text.lower())
+        return {w for w in words if w not in STOPWORDS and len(w) > 1}
+
+    @classmethod
+    def _match_canonical_milestone(cls, text: str) -> Optional[Dict[str, Any]]:
+        """Maps free-text quest string to a canonical STORYLINE_MILESTONES entry if it matches."""
+        if not text:
+            return None
+        t_low = text.strip().lower()
+        for m in STORYLINE_MILESTONES:
+            if t_low == m["title"].lower() or t_low == m["id"].lower():
+                return m
+            for kw in m["keywords"]:
+                if kw in t_low:
+                    return m
+        return None
+
+    @classmethod
+    def _is_similar_quest(cls, q1: str, q2: str) -> bool:
+        """Returns True if two quest strings represent the same semantic objective."""
+        if not q1 or not q2:
+            return False
+        s1 = q1.strip().lower()
+        s2 = q2.strip().lower()
+        if s1 == s2 or s1 in s2 or s2 in s1:
+            return True
+
+        m1 = cls._match_canonical_milestone(s1)
+        m2 = cls._match_canonical_milestone(s2)
+        if m1 and m2 and m1["id"] == m2["id"]:
+            return True
+
+        t1 = cls._tokenize_quest(s1)
+        t2 = cls._tokenize_quest(s2)
+        if t1 and t2:
+            overlap = len(t1 & t2) / float(min(len(t1), len(t2)))
+            if overlap >= 0.65:
+                return True
+
+        return SequenceMatcher(None, s1, s2).ratio() >= 0.72
+
+    def get_active_milestone(self) -> Optional[Dict[str, Any]]:
+        """Returns the current active storyline milestone (either matching priority_quest or first uncompleted)."""
+        if self.priority_quest:
+            matched = self._match_canonical_milestone(self.priority_quest)
+            if matched and matched["id"] not in self.completed_milestones:
+                return matched
+        for m in STORYLINE_MILESTONES:
+            if m["id"] not in self.completed_milestones:
+                return m
+        return None
+
+    def mark_milestone_completed(self, milestone_id: str) -> bool:
+        """
+        Marks a canonical milestone AND all earlier prerequisites in STORYLINE_MILESTONES as completed.
+        Purges any active quests matching those completed milestones and promotes the next milestone.
+        """
+        target_idx = -1
+        for idx, m in enumerate(STORYLINE_MILESTONES):
+            if m["id"] == milestone_id:
+                target_idx = idx
+                break
+        if target_idx < 0:
+            return False
+
+        changed = False
+        for idx in range(target_idx + 1):
+            m_id = STORYLINE_MILESTONES[idx]["id"]
+            if m_id not in self.completed_milestones:
+                self.completed_milestones.append(m_id)
+                changed = True
+
+        # Purge all quests in self.quests that correspond to any completed milestone
+        remaining_quests: List[str] = []
+        for q in self.quests:
+            m = self._match_canonical_milestone(q)
+            if m and m["id"] in self.completed_milestones:
+                changed = True
+                continue
+            remaining_quests.append(q)
+        self.quests = remaining_quests
+
+        # If priority_quest was completed or removed, promote next quest or next uncompleted milestone
+        if not self.quests:
+            next_m = self.get_active_milestone()
+            if next_m:
+                self.quests = [next_m["title"]]
+                self.priority_quest = next_m["title"]
+                changed = True
+            else:
+                self.priority_quest = None
+        elif self.priority_quest not in self.quests:
+            self.priority_quest = self.quests[0]
+            changed = True
+
+        if changed:
+            self.save()
+        return changed
+
+    def _deduplicate_quest_list(self):
+        """Cleans any legacy duplicate or already-completed quests from self.quests."""
+        cleaned: List[str] = []
+        for q in self.quests:
+            if not q or not q.strip():
+                continue
+            m = self._match_canonical_milestone(q)
+            if m and m["id"] in self.completed_milestones:
+                continue
+            canonical_text = m["title"] if m else q.strip()
+            if not any(self._is_similar_quest(canonical_text, existing) for existing in cleaned):
+                cleaned.append(canonical_text)
+        self.quests = cleaned
+        if not self.quests:
+            next_m = self.get_active_milestone()
+            if next_m:
+                self.quests = [next_m["title"]]
+        if self.quests and (not self.priority_quest or self.priority_quest not in self.quests):
+            self.priority_quest = self.quests[0]
 
     def update_micro_step(self, new_step: Optional[str]):
         """Sets or updates the immediate physical micro-step."""
@@ -134,16 +347,129 @@ class MemoryManager:
             self.save()
 
     def add_knowledge_note(self, note: str):
-        """Appends a verified game/ROM knowledge note."""
+        """Appends a verified game/ROM knowledge note (separate from rolling NPC dialogue history)."""
         if not note or not note.strip():
             return
         n_clean = note.strip()
         if n_clean not in self.knowledge_notes:
             self.knowledge_notes.append(n_clean)
-            if len(self.knowledge_notes) > 8:
-                self.knowledge_notes = self.knowledge_notes[-8:]
+            if len(self.knowledge_notes) > 12:
+                self.knowledge_notes = self.knowledge_notes[-12:]
             print(f"[MemoryManager] Added ROM Knowledge Note: '{n_clean}'")
             self.save()
+
+    def record_dialogue(
+        self,
+        turn_id: int,
+        text: str,
+        area: Optional[str] = None,
+        screen_mode: str = "OVERWORLD"
+    ) -> bool:
+        """
+        Records an overworld NPC or signpost dialogue into the rolling dialogue_history log.
+        - Filters out battle status spam.
+        - Merges multi-page speech bubbles from the same conversation (within 3 turns).
+        - Deduplicates repeated inspections of the same sign/NPC.
+        - Checks for deterministic location & quest milestone triggers.
+        """
+        if not text or not isinstance(text, str):
+            return False
+        clean = " ".join(text.strip().split())
+        if len(clean) < 3 or clean.upper() == "NULL":
+            return False
+
+        # Filter out battle spam
+        if screen_mode == "BATTLE":
+            return False
+        low = clean.lower()
+        if any(pat.lower() in low for pat in BATTLE_SPAM_PATTERNS):
+            return False
+
+        # Always check location & milestone triggers even if deduplicated
+        self.ingest_sign_or_dialogue_location(clean)
+        self._check_dialogue_milestone_triggers(clean)
+
+        cur_area = (area or self.current_area or "Unknown").strip()
+        max_history = getattr(config, "MAX_DIALOGUE_HISTORY", 20)
+
+        if self.dialogue_history:
+            last = self.dialogue_history[-1]
+            last_text = last.get("text", "")
+            last_turn = int(last.get("turn", -999))
+
+            # Check if identical or substring of recent entry
+            sim = SequenceMatcher(None, low, last_text.lower()).ratio()
+            if sim >= 0.82 or low in last_text.lower():
+                last["turn"] = turn_id
+                self.save()
+                return False
+
+            # Multi-page speech bubble continuation from the same conversation (within 3 turns in same area)
+            if 0 <= (turn_id - last_turn) <= 3 and last.get("area") == cur_area:
+                combined = f"{last_text} {clean}".strip()
+                if len(combined) <= 340:
+                    last["text"] = combined
+                    last["turn"] = turn_id
+                    self.save()
+                    return True
+
+            # Check if identical to 2nd-most-recent entry
+            if len(self.dialogue_history) >= 2:
+                prev2 = self.dialogue_history[-2].get("text", "").lower()
+                if SequenceMatcher(None, low, prev2).ratio() >= 0.85:
+                    return False
+
+        entry = {
+            "turn": turn_id,
+            "area": cur_area,
+            "text": clean[:340]
+        }
+        self.dialogue_history.append(entry)
+        if len(self.dialogue_history) > max_history:
+            self.dialogue_history = self.dialogue_history[-max_history:]
+        self.save()
+        return True
+
+    def _check_dialogue_milestone_triggers(self, text: str):
+        """Deterministically marks storyline milestones completed when key NPC dialogue appears."""
+        low = text.lower()
+        # Receiving Oak's Parcel at Viridian Mart
+        if any(k in low for k in ["oak's parcel", "oaks parcel", "received oak", "take this parcel", "custom poké ball", "custom poke ball"]):
+            if "deliver_oaks_parcel" not in self.completed_milestones:
+                self.mark_milestone_completed("reach_viridian_mart")
+                self.add_quest(STORYLINE_MILESTONES[5]["title"], is_priority=True)
+
+        # Delivering Oak's Parcel & Receiving Pokédex at Oak's Lab
+        if any(k in low for k in ["obtained the pokédex", "obtained the pokedex", "received the pokédex", "received the pokedex", "delivered oak", "my custom pok", "oh! that's the"]):
+            self.mark_milestone_completed("deliver_oaks_parcel")
+
+        # Defeating Brock -> Boulder Badge
+        if any(k in low for k in ["boulderbadge", "boulder badge"]):
+            self.mark_milestone_completed("defeat_brock")
+            if self.badges < 1:
+                self.badges = 1
+                self.save()
+
+    def sync_scene_milestones(self, area_type: str, screen_mode: str):
+        """
+        Deterministically advances storyline milestone tombstones based on verified visual scenes
+        so completed quests are never re-added when knowledge_notes roll over.
+        """
+        if area_type == "LIVING_ROOM_1F":
+            self.mark_milestone_completed("leave_bedroom")
+        elif area_type in ("OUTDOOR", "OAKS_LAB", "POKECENTER", "POKEMART", "GATEHOUSE"):
+            self.mark_milestone_completed("talk_to_mom_and_exit_house")
+
+        if area_type == "OAKS_LAB" and self.team:
+            # Player has already claimed Pikachu inside Oak's Lab
+            self.mark_milestone_completed("trigger_oak_grass")
+
+        if area_type == "OUTDOOR" and self.team:
+            # Player is outside with Pikachu in party -> Oak grass + Lab starter/rival are complete
+            self.mark_milestone_completed("claim_pikachu_and_beat_rival")
+
+        if "pewter" in self.current_area.lower():
+            self.mark_milestone_completed("reach_pewter_city")
 
     def update_supplies(
         self,
@@ -177,7 +503,16 @@ class MemoryManager:
         if self.last_items_update == txt:
             return  # Prevent duplicate addition on back-to-back turns
         self.last_items_update = txt
-        import re
+
+        # Check for milestone items in item updates too
+        if "parcel" in txt and ("delivered" in txt or "gave" in txt or "handed" in txt):
+            self.mark_milestone_completed("deliver_oaks_parcel")
+        elif "pokedex" in txt or "pokédex" in txt:
+            self.mark_milestone_completed("deliver_oaks_parcel")
+        elif "parcel" in txt:
+            if "deliver_oaks_parcel" not in self.completed_milestones:
+                self.mark_milestone_completed("reach_viridian_mart")
+
         ball_match = re.search(r'(\d+)\s*(?:pok[eé]\s*ball|ball)', txt)
         if ball_match:
             qty = int(ball_match.group(1))
@@ -203,7 +538,6 @@ class MemoryManager:
         if not update_text or not isinstance(update_text, str) or update_text.strip().upper() == "NULL":
             return
         txt = update_text.strip()
-        import re
         catch_match = re.search(
             r'(?:caught|added|got|received|chose|obtained|claimed|starter)\s+(?:starter\s+)?([A-Za-z]+)(?:\s*(?:lv|level)\s*(\d+))?',
             txt,
@@ -218,64 +552,101 @@ class MemoryManager:
                 moves = ["ThunderShock", "Growl"] if species.lower() == "pikachu" else []
                 self.team.append({"species": species, "level": level, "lead": is_lead, "key_moves": moves})
                 print(f"[MemoryManager] Team member added: {species} Lv{level}")
+                if species.lower() == "pikachu":
+                    self.mark_milestone_completed("trigger_oak_grass")
                 self.save()
 
     def add_quest(self, quest: str, is_priority: bool = False):
-        """Adds a quest to the log. Optionally sets it as highest priority."""
-        if not quest or not quest.strip():
+        """
+        Adds a quest to the log with semantic deduplication and sticky tombstone protection.
+        Rejects quests that match an already-completed storyline milestone.
+        """
+        if not quest or not quest.strip() or quest.strip().upper() == "NULL":
             return
-        q = quest.strip()
-        if q not in self.quests:
+        q_raw = quest.strip()
+
+        # Check if this quest maps to a canonical storyline milestone
+        milestone = self._match_canonical_milestone(q_raw)
+        if milestone:
+            if milestone["id"] in self.completed_milestones:
+                # Never resurrect a completed milestone!
+                return
+            q = milestone["title"]
+        else:
+            q = q_raw
+
+        # Semantic deduplication against existing quests
+        existing_match = None
+        for existing in self.quests:
+            if self._is_similar_quest(q, existing):
+                existing_match = existing
+                break
+
+        if existing_match is None:
             self.quests.append(q)
+            target_quest = q
+        else:
+            target_quest = existing_match
+
         if is_priority or self.priority_quest is None:
-            self.priority_quest = q
+            self.priority_quest = target_quest
         self.save()
 
     def complete_quest(self, query: str) -> Optional[str]:
         """
-        Marks a quest as completed and removes it from the quest log.
-        Promotes the next available quest if the completed one was highest priority.
+        Marks a quest as completed, records its canonical milestone tombstone (if applicable),
+        and removes ALL matching/duplicate variants from self.quests.
+        Promotes the next available quest (or next uncompleted storyline milestone).
         """
-        if not query or not query.strip():
+        if not query or not query.strip() or query.strip().upper() == "NULL":
             return None
-        q_lower = query.strip().lower()
+        q_clean = query.strip()
 
-        target_q = None
-        for q in self.quests:
-            if q.lower() == q_lower or q_lower in q.lower() or q.lower() in q_lower:
-                target_q = q
-                break
-
-        if target_q:
-            self.quests.remove(target_q)
-            if self.priority_quest == target_q:
-                self.priority_quest = self.quests[0] if self.quests else None
-            self.save()
-            return target_q
-        elif query.strip().upper() in ["ALL", "COMPLETED"]:
+        if q_clean.upper() in ["ALL", "COMPLETED", "CURRENT"]:
             if self.priority_quest:
-                old = self.priority_quest
-                if old in self.quests:
-                    self.quests.remove(old)
-                self.priority_quest = self.quests[0] if self.quests else None
-                self.save()
-                return old
+                q_clean = self.priority_quest
+            else:
+                return None
 
+        # Check if query maps to a canonical milestone -> record sticky tombstone
+        milestone = self._match_canonical_milestone(q_clean)
+        if milestone:
+            self.mark_milestone_completed(milestone["id"])
+
+        # Remove ALL quests in self.quests that match or are semantically similar to query
+        removed: List[str] = []
+        remaining: List[str] = []
+        for q in self.quests:
+            if self._is_similar_quest(q_clean, q):
+                removed.append(q)
+            else:
+                remaining.append(q)
+
+        self.quests = remaining
+
+        # If quest list is now empty, seed the next uncompleted canonical milestone
+        if not self.quests:
+            next_m = self.get_active_milestone()
+            if next_m:
+                self.quests = [next_m["title"]]
+
+        if not self.quests:
+            self.priority_quest = None
+        elif self.priority_quest not in self.quests:
+            self.priority_quest = self.quests[0]
+
+        self.save()
+        if removed:
+            return removed[0]
+        if milestone:
+            return milestone["title"]
         return None
 
     def set_priority_quest(self, query: str):
-        """Sets a quest as highest priority, adding it if not already present."""
-        if not query or not query.strip():
+        """Sets a quest as highest priority, deduplicating and checking tombstones first."""
+        if not query or not query.strip() or query.strip().upper() == "NULL":
             return
-        q_clean = query.strip()
-        for q in self.quests:
-            if q.lower() == q_clean.lower() or q_clean.lower() in q.lower():
-                self.priority_quest = q
-                self.save()
-                return
-        self.quests.append(q_clean)
-        self.priority_quest = q_clean
-        self.save()
+        self.add_quest(query.strip(), is_priority=True)
 
     def set_active_quest(self, new_quest: str):
         """Backward-compatible alias for adding/prioritizing a quest."""
@@ -325,6 +696,8 @@ class MemoryManager:
             prev = self.current_area
             self.current_area = matched_area
             self.add_route_node(matched_area)
+            if matched_area == "Pewter City":
+                self.mark_milestone_completed("reach_pewter_city")
             note = f"Signpost Read: Location identified as '{matched_area}' (Sign: \"{t_clean[:60]}\")"
             self.add_knowledge_note(note)
             print(f"[MemoryManager] Signpost Location Ingested: '{matched_area}' (was: '{prev}')")
@@ -370,7 +743,6 @@ class MemoryManager:
             "thought": thought or ""
         }
         self.turn_history.append(entry)
-        # Keep last 50 turns in memory to avoid unbounded growth in RAM
         if len(self.turn_history) > 100:
             self.turn_history = self.turn_history[-100:]
 
@@ -381,16 +753,28 @@ class MemoryManager:
         recent = self.turn_history[-n:]
         return " -> ".join([f"T{e['turn']}:{e['action']}" for e in recent])
 
-    def get_memory_context_prompt(self) -> str:
-        """Formats the memory tiers, quest log, party, supplies, and area waypoints into concise prompt text."""
+    def get_memory_context_prompt(self, full_dialogue: bool = False) -> str:
+        """
+        Formats the memory tiers, quest log, completed tombstones, walkthrough hint,
+        party, supplies, area waypoints, and rolling dialogue log into concise prompt text.
+        """
         lines = ["[Session Memory]"]
+
+        # Active Walkthrough Hint from Canonical Milestone DAG
+        active_m = self.get_active_milestone()
+        if active_m and active_m.get("walkthrough_hint"):
+            lines.append(f"- Walkthrough Guide: {active_m['walkthrough_hint']}")
+
+        # Completed Milestones (Sticky Tombstones so model never repeats finished quests)
+        if self.completed_milestones:
+            lines.append(f"- Completed Milestones (DO NOT REPEAT): {', '.join(self.completed_milestones[-6:])}")
 
         # Secondary Quests (Top priority quest is prominently displayed in turn prompt header)
         secondary_quests = [q for q in self.quests if q != self.priority_quest]
         if secondary_quests:
             lines.append(f"- Secondary Quests: {', '.join(secondary_quests)}")
 
-        # Strategy 2 & 3: Route Trail and Immediate Micro-Step
+        # Route Trail and Immediate Micro-Step
         if self.route_trail:
             lines.append(f"- Recent Route: {' -> '.join(self.route_trail)}")
         if self.micro_step:
@@ -418,6 +802,18 @@ class MemoryManager:
             for wp in waypoints:
                 lines.append(f"- {wp}")
 
+        # Rolling NPC & Sign Dialogue Log (4 on routine turns, up to 20 on stuck/rescue turns)
+        if self.dialogue_history:
+            recent_count = (
+                getattr(config, "MAX_DIALOGUE_HISTORY", 20)
+                if full_dialogue
+                else getattr(config, "DIALOGUE_PROMPT_RECENT_COUNT", 4)
+            )
+            selected_dialogues = self.dialogue_history[-recent_count:]
+            lines.append(f"\n[Recent Dialogue Log (last {len(selected_dialogues)} of {len(self.dialogue_history)})]:")
+            for d in selected_dialogues:
+                lines.append(f"- [T{d.get('turn', '?')} @ {d.get('area', '?')}]: \"{d.get('text', '')}\"")
+
         # Verified ROM Knowledge Notes
         if self.knowledge_notes:
             lines.append("\n[Learned ROM Notes]:")
@@ -429,6 +825,7 @@ class MemoryManager:
     def save(self):
         """Persists the current memory state to disk."""
         data = {
+            "completed_milestones": self.completed_milestones,
             "quests": self.quests,
             "priority_quest": self.priority_quest,
             "active_quest": self.priority_quest,
@@ -439,6 +836,7 @@ class MemoryManager:
             "supplies": self.supplies,
             "badges": self.badges,
             "knowledge_notes": self.knowledge_notes,
+            "dialogue_history": self.dialogue_history,
             "waypoints": self.waypoints,
             "short_term_memory": self.short_term_memory,
             "medium_term_memory": self.medium_term_memory,
@@ -453,11 +851,12 @@ class MemoryManager:
             print(f"[MemoryManager] Error saving memory: {e}")
 
     def load(self):
-        """Loads memory state from disk if exists."""
+        """Loads memory state from disk if exists and deduplicates any legacy quests."""
         if self.storage_path.exists():
             try:
                 with open(self.storage_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
+                    self.completed_milestones = data.get("completed_milestones", [])
                     self.quests = data.get("quests", [])
                     self.priority_quest = data.get("priority_quest", None)
 
@@ -474,18 +873,23 @@ class MemoryManager:
                     self.supplies = data.get("supplies", self.supplies)
                     self.badges = data.get("badges", self.badges)
                     self.knowledge_notes = data.get("knowledge_notes", self.knowledge_notes)
+                    self.dialogue_history = data.get("dialogue_history", [])
                     self.waypoints = data.get("waypoints", self.waypoints)
                     self.short_term_memory = data.get("short_term_memory", self.short_term_memory)
                     self.medium_term_memory = data.get("medium_term_memory", self.medium_term_memory)
                     self.long_term_memory = data.get("long_term_memory", self.long_term_memory)
+
+                    # Clean up any legacy duplicates or completed quests
+                    self._deduplicate_quest_list()
                 print(f"[MemoryManager] Loaded saved memory from {self.storage_path}")
             except Exception as e:
                 print(f"[MemoryManager] Error loading memory: {e}, using defaults.")
 
     def reset(self):
         """Resets memory to clean starting slate."""
-        self.quests = ["Leave Red's bedroom, go downstairs, and talk to Mom"]
-        self.priority_quest = "Leave Red's bedroom, go downstairs, and talk to Mom"
+        self.completed_milestones = []
+        self.quests = [STORYLINE_MILESTONES[0]["title"]]
+        self.priority_quest = STORYLINE_MILESTONES[0]["title"]
         self.current_area = "Pallet Town (Red's Bedroom)"
         self.route_trail = [
             "Red's Bedroom (2F)"
@@ -502,6 +906,7 @@ class MemoryManager:
         self.knowledge_notes = [
             "Yellow Recharged: Poké Balls available immediately at Viridian Mart with no parcel required to unlock."
         ]
+        self.dialogue_history = []
         self.waypoints = dict(DEFAULT_AREA_WAYPOINTS)
         self.short_term_memory = "Just started a fresh game in Red's bedroom (2F upstairs). Need to walk UP and RIGHT to the staircase in the top-right corner to go downstairs."
         self.medium_term_memory = "Pallet Town: Go downstairs, talk to Mom, head outside, meet Professor Oak, choose starter Pokémon, and defeat Rival."
@@ -509,3 +914,4 @@ class MemoryManager:
         self.turn_history.clear()
         self.save()
         print("[MemoryManager] Reset memory to clean starting slate.")
+

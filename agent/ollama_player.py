@@ -12,6 +12,7 @@ from PIL import Image
 import requests
 from pydantic import BaseModel
 
+import config as app_config
 from agent.gemini_player import (
     GBAButton,
     StandardTurnResponse,
@@ -20,7 +21,7 @@ from agent.gemini_player import (
     MediumMemoryTurnResponse,
     LongMemoryTurnResponse
 )
-from agent.prompts import SYSTEM_INSTRUCTION, build_turn_prompt
+from agent.prompts import SYSTEM_INSTRUCTION, get_system_instruction, build_turn_prompt
 
 
 class OllamaPlayer:
@@ -139,7 +140,10 @@ class OllamaPlayer:
         img_b64 = base64.b64encode(img_buffer.getvalue()).decode("utf-8")
 
         images_list = []
-        if previous_image is not None:
+        include_prev = previous_image is not None and (
+            bool(stuck_alert) or not getattr(app_config, "SEND_PREVIOUS_IMAGE_ONLY_WHEN_STUCK", True)
+        )
+        if include_prev:
             prev_buffer = io.BytesIO()
             previous_image.save(prev_buffer, format="JPEG", quality=85)
             images_list.append(base64.b64encode(prev_buffer.getvalue()).decode("utf-8"))
@@ -150,12 +154,13 @@ class OllamaPlayer:
             dialogue_crop.convert("RGB").save(crop_buffer, format="JPEG", quality=95)
             images_list.append(base64.b64encode(crop_buffer.getvalue()).decode("utf-8"))
 
+        is_battle = bool(battle_advisor_prompt) or "BATTLE" in (mode_hint or "").upper()
         payload = {
             "model": self.model_id,
             "messages": [
                 {
                     "role": "system",
-                    "content": f"{SYSTEM_INSTRUCTION}\nYou MUST respond ONLY in valid JSON conforming to the requested schema."
+                    "content": f"{get_system_instruction(is_battle=is_battle)}\nYou MUST respond ONLY in valid JSON conforming to the requested schema."
                 },
                 {
                     "role": "user",

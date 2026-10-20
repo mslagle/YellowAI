@@ -12,6 +12,7 @@ from PIL import Image
 import requests
 from pydantic import BaseModel
 
+import config as app_config
 from agent.gemini_player import (
     GBAButton,
     StandardTurnResponse,
@@ -20,7 +21,7 @@ from agent.gemini_player import (
     MediumMemoryTurnResponse,
     LongMemoryTurnResponse
 )
-from agent.prompts import SYSTEM_INSTRUCTION, build_turn_prompt
+from agent.prompts import SYSTEM_INSTRUCTION, get_system_instruction, build_turn_prompt
 
 
 class BionicPlayer:
@@ -155,7 +156,10 @@ class BionicPlayer:
         data_uri = f"data:image/jpeg;base64,{img_b64}"
 
         user_content = []
-        if previous_image is not None:
+        include_prev = previous_image is not None and (
+            bool(stuck_alert) or not getattr(app_config, "SEND_PREVIOUS_IMAGE_ONLY_WHEN_STUCK", True)
+        )
+        if include_prev:
             prev_buffer = io.BytesIO()
             previous_image.save(prev_buffer, format="JPEG", quality=85)
             prev_b64 = base64.b64encode(prev_buffer.getvalue()).decode("utf-8")
@@ -180,8 +184,9 @@ class BionicPlayer:
 
         user_content.append({"type": "text", "text": prompt_text})
 
+        is_battle = bool(battle_advisor_prompt) or "BATTLE" in (mode_hint or "").upper()
         schema_json = schema_cls.model_json_schema()
-        system_msg = f"{SYSTEM_INSTRUCTION}\nYou MUST respond STRICTLY in valid JSON matching this schema:\n{json.dumps(schema_json)}"
+        system_msg = f"{get_system_instruction(is_battle=is_battle)}\nYou MUST respond STRICTLY in valid JSON matching this schema:\n{json.dumps(schema_json)}"
 
         # Prefill assistant response with ```json\n{ to fast-track generation and skip reasoning delays
         messages = [

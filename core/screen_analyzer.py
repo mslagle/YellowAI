@@ -230,7 +230,7 @@ class ScreenAnalyzer:
         else:
             player = self._detect_player(arr)
             # In GBA Overworld & standard indoor rooms, camera is locked to Red at center (240, 160 -> Tile 7, 4)
-            if not player.detected and area_type in ("OVERWORLD", "BEDROOM_2F", "LIVING_ROOM_1F", "OAKS_LAB", "POKEMART", "POKECENTER"):
+            if not player.detected and area_type in ("OVERWORLD", "BEDROOM_2F", "LIVING_ROOM_1F", "OAKS_LAB", "POKEMART", "POKECENTER", "GENERIC_INDOOR", "GYM"):
                 player = PlayerState(
                     detected=True,
                     pixel_x=240,
@@ -271,8 +271,8 @@ class ScreenAnalyzer:
             if bag_empty:
                 notes.append("Player Bag is open, but this item pocket is completely EMPTY (0 items / only 'Cancel'). You have 0 usable items or Poké Balls here! Press B ('EXIT_ROOM') to close and return.")
             else:
-                notes.append("Player Bag is open. Press B ('EXIT_ROOM') to close and return.")
-            available_intents = ["EXIT_ROOM", "ADVANCE_DIALOGUE", "WAIT"]
+                notes.append("Player Bag is open. Press B ('EXIT_ROOM') to close and return, or use 'RAW_BUTTONS' to navigate.")
+            available_intents = ["EXIT_ROOM", "ADVANCE_DIALOGUE", "RAW_BUTTONS", "WAIT"]
         elif is_title_or_menu:
             area_type = "TITLE_SCREEN"
             notes.append(f"{area_desc}: Choose 'ADVANCE_DIALOGUE' (Press A) to proceed.")
@@ -291,18 +291,24 @@ class ScreenAnalyzer:
                 self._analyze_pokemart(arr, collision_grid, player, pois, notes, available_intents, is_dialogue=is_dialogue, is_shop_menu=is_shop_menu)
             elif area_type == "GATEHOUSE":
                 self._analyze_gatehouse(arr, collision_grid, player, pois, notes, available_intents, is_dialogue=is_dialogue)
+            elif area_type in ("GENERIC_INDOOR", "GYM"):
+                self._analyze_generic_indoor(arr, collision_grid, player, pois, notes, available_intents, is_dialogue=is_dialogue)
             else:
                 self._analyze_overworld(arr, collision_grid, player, pois, notes, available_intents, is_dialogue=is_dialogue)
 
             if is_start_menu:
-                notes.insert(0, "START MENU IS OPEN on the right side of the screen. Press B or choose 'ADVANCE_DIALOGUE' to close or interact with menu.")
+                notes.insert(0, "START MENU IS OPEN on the right side of the screen. Press B or choose 'ADVANCE_DIALOGUE' / 'RAW_BUTTONS' to close or interact with menu.")
                 if "ADVANCE_DIALOGUE" not in available_intents:
                     available_intents.insert(0, "ADVANCE_DIALOGUE")
+                if "RAW_BUTTONS" not in available_intents:
+                    available_intents.append("RAW_BUTTONS")
 
             if is_shop_menu:
-                notes.insert(0, "POKÉ MART SHOP MENU IS OPEN. Use 'ADVANCE_DIALOGUE' to buy items or press B to exit the shop menu.")
+                notes.insert(0, "POKÉ MART SHOP MENU IS OPEN. Use 'RAW_BUTTONS' (with `actions` e.g. ['A'] or ['DOWN', 'A'] or ['B', 'B']) or 'ADVANCE_DIALOGUE' to buy items or exit.")
                 if "ADVANCE_DIALOGUE" not in available_intents:
                     available_intents.insert(0, "ADVANCE_DIALOGUE")
+                if "RAW_BUTTONS" not in available_intents:
+                    available_intents.append("RAW_BUTTONS")
 
             if is_dialogue:
                 arrow_status = "Waiting for player input (Press A to advance)" if dialogue_has_arrow else "Text is rendering"
@@ -658,6 +664,7 @@ class ScreenAnalyzer:
                     return "OAKS_LAB", "Pallet Town - Professor Oak's Research Lab"
                 if tatami_score > 0.08:
                     return "LIVING_ROOM_1F", "Pallet Town - Mom's Living Room (1F)"
+                return "GENERIC_INDOOR", "Indoor Room / Building Interior"
 
         return "OVERWORLD", "Pallet Town / Kanto Overworld"
 
@@ -1567,7 +1574,76 @@ class ScreenAnalyzer:
             f"To travel SOUTH (toward Viridian City): Step SOUTH through SOUTH_GATE doorway at Col {south_door_col}, Row {south_door_row}."
         ])
 
-        available_intents.extend(["EXIT_ROOM", "GO_TO_POI", "EXPLORE_NORTH", "EXPLORE_SOUTH", "TALK_TO_NPC", "WAIT"])
+        available_intents.extend(["EXIT_ROOM", "GO_TO_POI", "EXPLORE_NORTH", "EXPLORE_SOUTH", "TALK_TO_NPC", "RAW_BUTTONS", "WAIT"])
+
+    def _analyze_generic_indoor(
+        self,
+        arr: np.ndarray,
+        grid: np.ndarray,
+        player: PlayerState,
+        pois: List[POI],
+        notes: List[str],
+        available_intents: List[str],
+        is_dialogue: bool = False
+    ):
+        """
+        Generic indoor room / Gym / House / Cave analyzer for rooms without a hardcoded template.
+        Detects red/orange exit welcome mats at the bottom of the room, marks top wall rows,
+        and enables both A* navigation and RAW_BUTTONS direct control.
+        """
+        p_col = player.tile_col if player.detected else 7
+        p_row = player.tile_row if player.detected else 4
+
+        exit_col, exit_row = p_col, min(GRID_ROWS - 1, 8)
+        mat_found = False
+
+        for r in range(5, GRID_ROWS):
+            for c in range(1, GRID_COLS - 1):
+                if grid[r, c] == CELL_VOID:
+                    continue
+                x1, y1, x2, y2 = tile_bounds(c, r)
+                patch = arr[y1:y2, x1:x2]
+                if patch.size == 0:
+                    continue
+                pr = patch[:, :, 0].astype(int)
+                pg = patch[:, :, 1].astype(int)
+                pb = patch[:, :, 2].astype(int)
+                is_mat = float(np.mean((pr > 155) & (pg < 110) & (pb < 110) & (pr > pb + 45))) > 0.22
+                if is_mat:
+                    exit_col, exit_row = c, r
+                    mat_found = True
+                    break
+            if mat_found:
+                break
+
+        if not mat_found:
+            # Find lowest non-void row near center
+            for r in range(GRID_ROWS - 1, 4, -1):
+                if grid[r, p_col] == CELL_WALKABLE:
+                    exit_col, exit_row = p_col, r
+                    break
+
+        grid[exit_row, exit_col] = CELL_WARP
+        if player.detected and 0 <= p_row < GRID_ROWS and 0 <= p_col < GRID_COLS:
+            grid[p_row, p_col] = CELL_WALKABLE
+
+        epx, epy = tile_to_pixel_center(exit_col, exit_row)
+        pois.append(POI(
+            name="ROOM_EXIT",
+            category="WARP",
+            tile_col=exit_col,
+            tile_row=exit_row,
+            pixel_x=epx,
+            pixel_y=epy,
+            description="Room Exit Mat / Doorway",
+            interaction_tile=(exit_col, exit_row)
+        ))
+
+        notes.append(f"Generic Indoor Room / Gym Interior: Exit mat at ({exit_col}, {exit_row}). Use 'EXIT_ROOM', 'EXPLORE_*', or 'RAW_BUTTONS' with explicit `actions`.")
+        available_intents.extend([
+            "EXIT_ROOM", "GO_TO_POI", "EXPLORE_NORTH", "EXPLORE_SOUTH",
+            "EXPLORE_EAST", "EXPLORE_WEST", "TALK_TO_NPC", "RAW_BUTTONS", "WAIT"
+        ])
 
     def _analyze_pokemart(
         self,

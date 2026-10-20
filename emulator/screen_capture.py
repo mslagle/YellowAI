@@ -199,13 +199,15 @@ class ScreenCapture:
         if cw <= 50 or ch <= 50:
             return None, None
 
-        # 1. Capture client area using PrintWindow with PW_CLIENTONLY
+        # 1. Capture client area using PrintWindow with PW_CLIENTONLY | PW_RENDERFULLCONTENT
         hwnd_dc = user32.GetWindowDC(hwnd)
         mfc_dc = gdi32.CreateCompatibleDC(hwnd_dc)
         save_bitmap = gdi32.CreateCompatibleBitmap(hwnd_dc, cw, ch)
         gdi32.SelectObject(mfc_dc, save_bitmap)
 
-        pw_success = user32.PrintWindow(hwnd, mfc_dc, PW_CLIENTONLY)
+        pw_success = user32.PrintWindow(hwnd, mfc_dc, PW_CLIENTONLY | PW_RENDERFULLCONTENT)
+        if not pw_success:
+            pw_success = user32.PrintWindow(hwnd, mfc_dc, PW_CLIENTONLY)
 
         bmi = _create_bmi(cw, ch)
         buffer = ctypes.create_string_buffer(cw * ch * 4)
@@ -217,7 +219,7 @@ class ScreenCapture:
 
         client_img = Image.frombuffer('RGBA', (cw, ch), buffer, 'raw', 'BGRA', 0, 1).convert('RGB')
 
-        # Fallback to desktop BitBlt if PrintWindow returned black or failed
+        # Fallback to desktop BitBlt only if PrintWindow returned black or failed
         arr_check = np.array(client_img)
         if not pw_success or arr_check.max() < 10:
             pt = wintypes.POINT(0, 0)
