@@ -58,17 +58,21 @@ if not defined HAS_BACKEND (
     echo =====================================================================
     echo  Select Intelligence Backend:
     echo  [1] Google Gemini 3.5 Flash [Cloud API]
-    echo  [2] Ollama Local VLM [100%% Free / RTX 3060 - Qwen 3.5]
+    echo  [2] Hybrid Mode [Gemma 4 E2B Local + Cloud Gemini Escalation]
     echo  [3] Bionic / LM Studio Local Server [100%% Free / Port 1234]
+    echo  [4] Ollama Local VLM [100%% Free / RTX 3060 - Qwen 3.5]
     echo =====================================================================
     set "USER_CHOICE=1"
-    set /p "USER_CHOICE=Enter choice [1, 2, or 3, default is 1]: "
-    if "!USER_CHOICE!"=="3" (
+    set /p "USER_CHOICE=Enter choice [1, 2, 3, or 4, default is 1]: "
+    if "!USER_CHOICE!"=="4" (
+        set "BACKEND_FLAG=--backend ollama"
+        echo [Backend] Selected: Ollama Local VLM
+    ) else if "!USER_CHOICE!"=="3" (
         set "BACKEND_FLAG=--backend bionic"
         echo [Backend] Selected: Bionic / LM Studio Local Server
     ) else if "!USER_CHOICE!"=="2" (
-        set "BACKEND_FLAG=--backend ollama"
-        echo [Backend] Selected: Ollama Local VLM
+        set "BACKEND_FLAG=--backend hybrid"
+        echo [Backend] Selected: Hybrid Mode (Local + Cloud Escalation)
     ) else (
         set "BACKEND_FLAG=--backend gemini"
         echo [Backend] Selected: Google Gemini 3.5 Flash

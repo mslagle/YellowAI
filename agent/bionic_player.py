@@ -30,12 +30,12 @@ class BionicPlayer:
         base_url: str = "http://localhost:1234/v1",
         model_id: str = "default",
         temperature: float = 0.2,
-        timeout: float = 60.0
+        timeout: Optional[float] = None
     ):
         self.base_url = base_url.rstrip("/")
         self.model_id = model_id
         self.temperature = temperature
-        self.timeout = timeout
+        self.timeout = timeout if timeout is not None else getattr(app_config, "BIONIC_TIMEOUT", 15.0)
         self.consecutive_errors: int = 0
 
     def select_schema_for_turn(self, turn_id: int) -> Tuple[Type[BaseModel], str]:
@@ -102,10 +102,63 @@ class BionicPlayer:
             resp = requests.get(url, timeout=2.0)
             if resp.status_code == 200:
                 data = resp.json().get("data", [])
-                return [m.get("id", "") for m in data if m.get("id")]
+                models = [m.get("id", "") for m in data if m.get("id")]
+                # Filter out embedding-only models
+                return [m for m in models if "embed" not in m.lower()]
         except Exception:
             pass
         return []
+
+    def ensure_model_loaded(self, model_id: Optional[str] = None) -> bool:
+        """
+        Uses LM Studio / Bionic's v1 API to programmatically load the vision model if it's currently unloaded.
+        """
+        target = model_id or self._resolve_model_id()
+        if not target or target == "default":
+            # Check available models on server
+            base = self.base_url.rstrip("/v1")
+            try:
+                r = requests.get(f"{base}/api/v0/models", timeout=2.0)
+                if r.status_code == 200:
+                    vlm_candidates = [
+                        m.get("id") for m in r.json().get("data", [])
+                        if m.get("type") == "vlm" or "gemma" in m.get("id", "").lower() or "qwen" in m.get("id", "").lower()
+                    ]
+                    if vlm_candidates:
+                        target = vlm_candidates[0]
+            except Exception:
+                pass
+
+        if not target or target == "default":
+            return False
+
+        base = self.base_url.rstrip("/v1")
+        # Check if already loaded
+        try:
+            r = requests.get(f"{base}/api/v0/models", timeout=2.0)
+            if r.status_code == 200:
+                for m in r.json().get("data", []):
+                    if m.get("id") == target and m.get("state") == "loaded":
+                        return True
+        except Exception:
+            pass
+
+        # Programmatically trigger load via LM Studio / Bionic API
+        try:
+            print(f"[BionicPlayer] Automatically loading '{target}' into memory via LM Studio API...")
+            resp = requests.post(
+                f"{base}/api/v1/models/load",
+                json={"model": target},
+                timeout=45.0
+            )
+            if resp.status_code == 200 and resp.json().get("status") == "loaded":
+                load_time = resp.json().get("load_time_seconds", "?")
+                print(f"[BionicPlayer] Successfully loaded '{target}' in {load_time}s!")
+                self.model_id = target
+                return True
+        except Exception as e:
+            print(f"[BionicPlayer] Auto-load error: {e}")
+        return False
 
     def _resolve_model_id(self) -> str:
         """Auto-detects active model if model_id is 'default' or unspecified."""
@@ -188,7 +241,6 @@ class BionicPlayer:
         schema_json = schema_cls.model_json_schema()
         system_msg = f"{get_system_instruction(is_battle=is_battle)}\nYou MUST respond STRICTLY in valid JSON matching this schema:\n{json.dumps(schema_json)}"
 
-        # Prefill assistant response with ```json\n{ to fast-track generation and skip reasoning delays
         messages = [
             {
                 "role": "system",
@@ -197,17 +249,13 @@ class BionicPlayer:
             {
                 "role": "user",
                 "content": user_content
-            },
-            {
-                "role": "assistant",
-                "content": "```json\n{"
             }
         ]
 
         payload = {
             "model": self._resolve_model_id(),
             "messages": messages,
-            "max_tokens": 500,
+            "max_tokens": 800,
             "temperature": self.temperature
         }
 
@@ -215,16 +263,34 @@ class BionicPlayer:
 
         try:
             resp = requests.post(chat_url, json=payload, timeout=self.timeout)
-            # If server rejects assistant prefill with 400, retry without it
-            if resp.status_code == 400:
-                payload["messages"] = messages[:2]
-                resp = requests.post(chat_url, json=payload, timeout=self.timeout)
 
-            resp.raise_for_status()
+            # Check for error payload (e.g. Model is unloaded)
+            if resp.status_code != 200:
+                try:
+                    err_json = resp.json()
+                    err_msg = err_json.get("error", resp.text)
+                except Exception:
+                    err_msg = resp.text
+                if "unloaded" in str(err_msg).lower():
+                    raise RuntimeError(f"LM Studio reports model '{self._resolve_model_id()}' is unloaded. Please click 'Load' in LM Studio!")
+                resp.raise_for_status()
 
             data = resp.json()
+            if "error" in data:
+                err_msg = data["error"]
+                if "unloaded" in str(err_msg).lower():
+                    raise RuntimeError(f"LM Studio reports model '{self._resolve_model_id()}' is unloaded. Please click 'Load' in LM Studio!")
+                raise RuntimeError(f"LM Studio error: {err_msg}")
             message_obj = data.get("choices", [{}])[0].get("message", {})
             raw_content = message_obj.get("content", "").strip()
+            reasoning_content = message_obj.get("reasoning_content", "").strip()
+
+            # If thinking model placed JSON inside reasoning or content was empty
+            if not raw_content and reasoning_content and "{" in reasoning_content:
+                s_idx = reasoning_content.find("{")
+                e_idx = reasoning_content.rfind("}")
+                if s_idx != -1 and e_idx != -1:
+                    raw_content = reasoning_content[s_idx:e_idx+1]
 
             # Clean markdown codeblocks and restore leading bracket if prefilled
             if raw_content.endswith("```"):

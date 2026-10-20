@@ -28,6 +28,7 @@ try:
 except Exception:
     pass
 
+import config
 from config import (
     BASE_DIR,
     GEMINI_API_KEY,
@@ -118,6 +119,7 @@ def main():
     from config import HYBRID_LOCAL_BACKEND
     parser = argparse.ArgumentParser(description="YellowAI: Autonomous Pokémon Yellow Recharged Player")
     parser.add_argument("--backend", type=str, choices=["hybrid", "gemini", "ollama", "bionic", "lmstudio"], default=LLM_BACKEND, help="Intelligence backend: 'hybrid' (local + cloud escalation), 'gemini' (cloud), 'ollama' (free local VLM), or 'bionic'/'lmstudio' (local server at port 1234).")
+    parser.add_argument("--tts-provider", type=str, choices=["edge", "sapi", "none"], default=getattr(config, "TTS_PROVIDER", "edge"), help="TTS voice engine: 'edge' (neural, auto-falls back to Windows SAPI on error), 'sapi' (offline Windows voice), or 'none'.")
     parser.add_argument("--max-turns", type=int, default=None, help="Maximum turns to run before stopping.")
     parser.add_argument("--no-tts", action="store_true", help="Disable TTS audio commentary.")
     parser.add_argument("--model", type=str, default=GEMINI_MODEL_ID, help="Gemini model ID to use (when backend=gemini or hybrid escalation).")
@@ -133,6 +135,7 @@ def main():
     parser.add_argument("--serve-overlay", action="store_true", help="Run standalone OBS stream overlay server at http://localhost:8080/.")
 
     args = parser.parse_args()
+    config.TTS_PROVIDER = args.tts_provider
     setup_logging(BASE_DIR)
 
     if args.serve_overlay:
@@ -199,6 +202,8 @@ def main():
                 print("!" * 65 + "\n")
                 sys.exit(1)
         else:
+            # Auto-load model if currently unloaded in LM Studio / Bionic
+            bionic_checker.ensure_model_loaded(args.bionic_model if args.bionic_model != "default" else None)
             loaded_models = bionic_checker.get_loaded_models()
             if loaded_models:
                 print(f"[YellowAI] Connected to local server. Loaded models: {loaded_models}")

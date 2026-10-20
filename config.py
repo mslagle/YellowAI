@@ -57,6 +57,10 @@ OLLAMA_MODEL_ID = os.getenv("OLLAMA_MODEL_ID", "qwen3.5")
 # Local Bionic / LM Studio Settings (100% Free / Port 1234)
 BIONIC_BASE_URL = os.getenv("BIONIC_BASE_URL", "http://localhost:1234/v1")
 BIONIC_MODEL_ID = os.getenv("BIONIC_MODEL_ID", "default")
+BIONIC_TIMEOUT = float(os.getenv("BIONIC_TIMEOUT", "15.0"))  # Seconds to wait before escalating in hybrid mode
+
+# TTS Voice Commentary Configuration ("edge", "sapi", or "none")
+TTS_PROVIDER = os.getenv("TTS_PROVIDER", "edge").lower().strip()
 
 # Background Input & Window Focus Configuration
 # Options: "postmessage" (Win32 background messages, no focus needed),

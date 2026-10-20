@@ -187,7 +187,7 @@ class GameLoop:
         if self.anti_stuck.consecutive_stuck_turns >= HYBRID_ESCALATE_ON_STUCK_TURNS:
             return self.escalation_player, f"STUCK_{self.anti_stuck.consecutive_stuck_turns}_TURNS"
 
-        if getattr(self.gemini_player, "consecutive_errors", 0) >= 2:
+        if getattr(self.gemini_player, "consecutive_errors", 0) >= 1:
             return self.escalation_player, "LOCAL_MODEL_ERROR_FALLBACK"
 
         if scene.area_type in ("GENERIC_INDOOR", "GYM"):
@@ -591,6 +591,32 @@ class GameLoop:
                         emulator_verified=True
                     )
                     api_duration = time.time() - api_start
+
+                    # Immediate in-turn escalation if local player errored or timed out
+                    if (
+                        decision.get("cadence_tag") == "ERROR_FALLBACK"
+                        and self.backend == "hybrid"
+                        and self.escalation_player is not None
+                        and self.escalation_player is not active_player
+                    ):
+                        print(f"[Hybrid Escalation] Local model error/timeout on Turn {self.turn_id}; immediately falling back to Cloud Gemini!")
+                        log_file_only(f"[Hybrid Escalation] Local model error/timeout on Turn {self.turn_id}; immediately falling back to Cloud Gemini")
+                        esc_start = time.time()
+                        decision = self.escalation_player.decide_action(
+                            turn_id=self.turn_id,
+                            image=frame,
+                            previous_image=self.previous_frame,
+                            memory_context=memory_prompt,
+                            active_quest=self.memory_manager.active_quest,
+                            action_history=action_history_prompt,
+                            stuck_alert=stuck_alert or "",
+                            mode_hint=mode_hint,
+                            battle_thinking_budget=BATTLE_THINKING_BUDGET if trigger_battle_thinking else None,
+                            battle_advisor_prompt=battle_advisor_prompt,
+                            dialogue_crop=scene.dialogue_crop,
+                            emulator_verified=True
+                        )
+                        api_duration += (time.time() - esc_start)
 
                     intent = decision.get("intent", "EXIT_ROOM")
                     target_poi = decision.get("target_poi")
