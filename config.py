@@ -36,9 +36,11 @@ for _d in (STATE_DIR, LOGS_DIR, TEMP_DIR, TEMP_SCREENSHOTS_DIR):
 # Local Ollama VLM Configuration (RTX 3060 12GB VRAM)
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL_ID = os.getenv("OLLAMA_MODEL_ID", "qwen3.5:9b")
-OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "16384"))
-OLLAMA_TIMEOUT = float(os.getenv("OLLAMA_TIMEOUT", "120.0"))
+OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "8192"))
+OLLAMA_TIMEOUT = float(os.getenv("OLLAMA_TIMEOUT", "60.0"))
 OLLAMA_THINK_MODE = os.getenv("OLLAMA_THINK_MODE", "auto")  # auto | always | never
+OLLAMA_MAX_TOKENS_THINK = int(os.getenv("OLLAMA_MAX_TOKENS_THINK", "1800"))
+OLLAMA_MAX_TOKENS_FAST = int(os.getenv("OLLAMA_MAX_TOKENS_FAST", "600"))
 OLLAMA_SAVE_THINKING_TRACES = os.getenv("OLLAMA_SAVE_THINKING_TRACES", "true").lower() == "true"
 
 # Multi-Turn Conversation History & Compaction

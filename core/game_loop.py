@@ -68,17 +68,34 @@ class GameLoop:
 
         self.run_temp_dir = config.TEMP_SCREENSHOTS_DIR / f"run_{self.conversation_history.current_run_id}"
         self.run_temp_dir.mkdir(parents=True, exist_ok=True)
-        self.previous_thumb: Optional[Image.Image] = None
+        self.previous_thumb: Optional[np.ndarray] = None
+        self.previous_frame: Optional[Image.Image] = None
+        self.recent_thumbs: List[np.ndarray] = []
+        self.recent_dialogues: List[str] = []
         self.unchanged_turns: int = 0
+        self.loop_turns: int = 0
+        self.escape_idx: int = 0
+        self.blocked_dirs_here: List[str] = []
+        self.last_synth_area_turn = ("", -999)
         self.recent_button_log: List[str] = []
 
-    def _compute_screen_changed(self, thumb: Image.Image) -> bool:
+    def _compute_screen_changed(self, thumb: np.ndarray) -> bool:
         if self.previous_thumb is None:
             return True
         arr_curr = np.asarray(thumb, dtype=np.int16)
         arr_prev = np.asarray(self.previous_thumb, dtype=np.int16)
         diff = float(np.mean(np.abs(arr_curr - arr_prev)))
         return diff > 1.8
+
+    def _detect_frame_oscillation(self, thumb: np.ndarray) -> bool:
+        """Detects 2-to-8-turn visual toggle loops (e.g. repeatedly opening/closing the same poster/sign)."""
+        if len(self.recent_thumbs) < 2:
+            return False
+        arr_curr = np.asarray(thumb, dtype=np.int16)
+        for older in self.recent_thumbs[:-1]:
+            if float(np.mean(np.abs(arr_curr - np.asarray(older, dtype=np.int16)))) <= 1.8:
+                return True
+        return False
 
     def _save_temp_screenshot(self, frame: Image.Image, turn_id: int) -> str:
         path = self.run_temp_dir / f"turn_{turn_id:05d}.png"
@@ -123,7 +140,7 @@ class GameLoop:
                 if max_turns is not None and self.turn_id >= max_turns:
                     print(f"[GameLoop] Reached max turns ({max_turns}).")
                     break
-                if not self.screen_capture.is_emulator_alive():
+                if not self.screen_capture.is_window_alive():
                     print("[GameLoop] mGBA window closed; stopping cleanly.")
                     break
 
@@ -136,41 +153,67 @@ class GameLoop:
                 shot_path = self._save_temp_screenshot(frame, self.turn_id)
 
                 screen_changed = self._compute_screen_changed(thumb)
+                frame_oscillating = self._detect_frame_oscillation(thumb)
                 self.unchanged_turns = 0 if screen_changed else (self.unchanged_turns + 1)
+                if not screen_changed or frame_oscillating:
+                    self.loop_turns += 1
+                else:
+                    self.loop_turns = 0
 
                 if self.turn_id > 1:
                     prev_btns = self.conversation_history.active_turns[-1].get("buttons", []) if self.conversation_history.active_turns else []
                     self.conversation_history.update_last_turn_outcome(
                         buttons_executed=prev_btns,
-                        outcome="CHANGED" if screen_changed else "UNCHANGED",
+                        outcome="LOOPING" if frame_oscillating else ("CHANGED" if screen_changed else "UNCHANGED"),
                     )
+                    if not screen_changed or frame_oscillating:
+                        for b in prev_btns:
+                            if b in {"UP", "DOWN", "LEFT", "RIGHT"} and b not in self.blocked_dirs_here:
+                                self.blocked_dirs_here.append(b)
+                    else:
+                        self.blocked_dirs_here.clear()
 
                 stuck_alert = ""
-                if self.unchanged_turns >= 3:
+                if self.unchanged_turns >= 3 or self.loop_turns >= 3:
+                    untried = [d for d in ("UP", "DOWN", "LEFT", "RIGHT") if d not in self.blocked_dirs_here]
+                    blocked_note = (
+                        f" Directions already BLOCKED here: {self.blocked_dirs_here}."
+                        + (f" Try untried direction(s): {untried}!" if untried else "")
+                        if self.blocked_dirs_here
+                        else ""
+                    )
                     stuck_alert = (
-                        f"Screen pixels barely changed for {self.unchanged_turns} turns! "
-                        "If blocked by wall/NPC try another direction; if in menu/dialogue press B or A; "
-                        "or use `web_search_query`."
+                        f"LOOP DETECTED ({max(self.unchanged_turns, self.loop_turns)} turns)! "
+                        "You are revisiting the exact same screen, wall, sign, or menu. "
+                        f"Press B if a textbox/menu is open, then move in a different direction.{blocked_note}"
                     )
 
-                if (self.unchanged_turns == 6 or (self.goal_tracker.is_drifting(12) and self.turn_id % 12 == 0)) and self.player.enable_web_search:
-                    log_file_only("[GameLoop] Consulting web search & re-synthesizing goal after drift/stagnation...")
+                same_area_cooldown = (
+                    self.goal_tracker.current_area == self.last_synth_area_turn[0]
+                    and (self.turn_id - self.last_synth_area_turn[1]) < 30
+                )
+                if (
+                    not same_area_cooldown
+                    and (self.loop_turns == 6 or (self.goal_tracker.is_drifting(18) and self.turn_id % 24 == 0))
+                    and self.player.enable_web_search
+                ):
+                    log_file_only("[GameLoop] Consulting web search & re-synthesizing goal after drift/loop...")
+                    self.last_synth_area_turn = (self.goal_tracker.current_area, self.turn_id)
                     self.player.synthesize_goal_from_discoveries(
                         image=frame,
-                        extra_context=f"Stuck/drifting for {self.unchanged_turns} unchanged / {self.goal_tracker.turns_without_change} stagnant turns.",
+                        extra_context=f"Caught in UI/wall loop for {self.loop_turns} turns / {self.goal_tracker.turns_without_change} stagnant turns.",
                     )
 
                 discovery_directive = ""
                 if self.discovery_active:
-                    self.discovery_turns += 1
                     discovery_directive = self.goal_tracker.format_discovery_directive(
-                        self.discovery_turns, self.max_discovery_turns
+                        self.discovery_turns + 1, self.max_discovery_turns
                     )
 
                 decision = self.player.decide_action(
                     turn_id=self.turn_id,
                     image=frame,
-                    previous_image=self.previous_thumb,
+                    previous_image=self.previous_frame,
                     discovery_directive=discovery_directive,
                     action_history=" -> ".join(self.recent_button_log[-6:]),
                     stuck_alert=stuck_alert,
@@ -180,14 +223,22 @@ class GameLoop:
 
                 # Losslessly record any visible sign, speech, or menu text
                 diag = decision.get("dialogue_text")
+                new_dialogue_seen = False
+                dialogue_repeating = False
                 if isinstance(diag, str) and diag.strip() and diag.strip().upper() != "NULL":
-                    self.dialogue_recorder.record(
-                        text=diag.strip(),
+                    clean_diag = " ".join(diag.strip().split())
+                    if clean_diag.lower() in [d.lower() for d in self.recent_dialogues]:
+                        dialogue_repeating = True
+                    self.recent_dialogues.append(clean_diag)
+                    self.recent_dialogues = self.recent_dialogues[-6:]
+                    rec = self.dialogue_recorder.record(
+                        text=clean_diag,
                         turn_id=self.turn_id,
                         run_id=self.conversation_history.current_run_id,
                         area=decision.get("current_area") or self.goal_tracker.current_area,
                         screenshot_path=shot_path,
                     )
+                    new_dialogue_seen = rec is not None
 
                 # Drop completed goals FIRST before updating active/new goals
                 comp = decision.get("completed_goal")
@@ -196,6 +247,7 @@ class GameLoop:
                     if dropped:
                         log_file_only(f"[Goal Dropped]: '{dropped}'")
 
+                is_looping_now = (self.loop_turns >= 2) or dialogue_repeating
                 self.goal_tracker.update_from_turn(
                     area=decision.get("current_area"),
                     discovered_fact=decision.get("discovered_fact"),
@@ -205,21 +257,38 @@ class GameLoop:
                     next_step=decision.get("next_step"),
                     grand_goal_update=decision.get("grand_goal_update"),
                     screen_changed=screen_changed,
+                    loop_detected=is_looping_now,
+                    new_dialogue_seen=new_dialogue_seen,
                 )
 
-                # Complete Discovery Audit Mode and synthesize next objective from menus + signs + web
+                # Only count Discovery Audit turns once past Title/Intro/Naming screens
                 if self.discovery_active:
                     screen_kind = str(decision.get("screen_kind") or "").upper()
+                    in_inspectable_game = screen_kind in {
+                        "OVERWORLD", "START_MENU", "TRAINER_CARD", "PARTY_MENU", "BAG_MENU", "POKEDEX"
+                    }
+                    if in_inspectable_game:
+                        self.discovery_turns += 1
                     menus_done = not self.goal_tracker.get_uninspected_menus() and screen_kind == "OVERWORLD"
-                    ready_signal = bool(decision.get("ready_to_plan_goal")) and screen_kind != "TITLE_OR_MENU"
+                    ready_signal = bool(decision.get("ready_to_plan_goal")) and in_inspectable_game
                     if ready_signal or menus_done or self.discovery_turns >= self.max_discovery_turns:
                         self.discovery_active = False
                         self.goal_tracker.discovery_done_this_run = True
                         log_file_only("[Discovery Mode] Menu/sign audit finished -> synthesizing goal from online search + verified facts...")
                         self.player.synthesize_goal_from_discoveries(image=frame)
 
-                # Execute returned GBA button presses directly
+                # Execute returned GBA button presses directly (prefer untried directions on 4-way loop escape)
                 buttons = decision.get("flat_actions") or ["A"]
+                if self.loop_turns >= 7 and self.loop_turns % 4 == 3:
+                    dirs = ["RIGHT", "UP", "DOWN", "LEFT"]
+                    untried = [d for d in dirs if d not in self.blocked_dirs_here]
+                    pool = untried or dirs
+                    esc_dir = pool[self.escape_idx % len(pool)]
+                    self.escape_idx += 1
+                    log_file_only(f"[Loop Breaker] Breaking out of {self.loop_turns}-turn loop with ['B', '{esc_dir}', '{esc_dir}']")
+                    buttons = ["B", esc_dir, esc_dir]
+                    self.recent_thumbs.clear()
+
                 for btn in buttons:
                     self.input_controller.press_button(btn)
                     time.sleep(self.step_settle_delay)
@@ -232,6 +301,9 @@ class GameLoop:
                 )
 
                 self.previous_thumb = thumb
+                self.previous_frame = frame
+                self.recent_thumbs.append(thumb)
+                self.recent_thumbs = self.recent_thumbs[-8:]
                 time.sleep(self.turn_settle_delay)
 
         except KeyboardInterrupt:

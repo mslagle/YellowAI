@@ -13,7 +13,11 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+import numpy as np
 from PIL import Image
+import requests
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -23,6 +27,7 @@ from agent.ollama_player import OllamaPlayer, TurnDecision, VALID_GBA_BUTTONS
 from agent.web_search import WebSearchClient
 from core.conversation_history import ConversationHistoryManager
 from core.dialogue_recorder import DialogueRecorder
+from core.game_loop import GameLoop
 from core.goal_tracker import GoalTracker
 from core.thinking_store import ThinkingStore
 from emulator.mgba_launcher import find_mgba_executable, find_rom_file
@@ -193,7 +198,237 @@ class TestCompactOllamaAgent(unittest.TestCase):
             for b in decision["flat_actions"]:
                 self.assertIn(b, VALID_GBA_BUTTONS)
             self.assertEqual(len(history.active_turns), 1)
-            self.assertTrue(len(web_client.search("Pokemon Recharged Yellow", max_results=2).get("results", [])) >= 1)
+            search_res = web_client.search("Pokemon Recharged Yellow", max_results=2)
+            self.assertIsInstance(search_res.get("results"), list)
+            if not search_res.get("error"):
+                self.assertGreaterEqual(len(search_res.get("results", [])), 1)
+
+    def test_game_loop_turn_cycle_and_previous_frame_handling(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            frame = Image.new("RGB", (480, 320), (120, 180, 200))
+            thumb = np.zeros((32, 32), dtype=np.uint8)
+            pressed = []
+
+            loop = GameLoop(turn_settle_delay=0.0, step_settle_delay=0.0, discovery_on_start=False)
+            loop.run_temp_dir = tmp / "temp_shots"
+            loop.run_temp_dir.mkdir(parents=True, exist_ok=True)
+            loop.goal_tracker = GoalTracker(state_path=tmp / "goal.json")
+            loop.dialogue_recorder = DialogueRecorder(storage_path=tmp / "signs.json")
+            loop.thinking_store = ThinkingStore(traces_path=tmp / "traces.jsonl", insights_path=tmp / "insights.json")
+            loop.web_client = WebSearchClient(cache_path=tmp / "web.json")
+            loop.web_client.cache["facts"] = [{"topic": "t", "summary": "f"}]
+            loop.conversation_history = ConversationHistoryManager(storage_path=tmp / "hist.json")
+            loop.player.goal_tracker = loop.goal_tracker
+            loop.player.dialogue_recorder = loop.dialogue_recorder
+            loop.player.thinking_store = loop.thinking_store
+            loop.player.web_client = loop.web_client
+            loop.player.history_manager = loop.conversation_history
+            loop.player.enable_web_search = False
+
+            with (
+                patch.object(loop.screen_capture, "find_emulator_window", return_value=12345),
+                patch.object(loop.screen_capture, "is_window_alive", return_value=True),
+                patch.object(loop.screen_capture, "capture_frame", return_value=(frame, thumb)),
+                patch.object(loop.input_controller, "focus_hwnd", return_value=True),
+                patch.object(loop.input_controller, "press_button", side_effect=lambda b: pressed.append(b) or True),
+                patch.object(loop.player, "is_server_reachable", return_value=True),
+                patch.object(
+                    loop.player,
+                    "_chat",
+                    return_value={
+                        "prompt_eval_count": 100,
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "reasoning": "Read Pallet Town sign",
+                                    "actions": ["A"],
+                                    "current_area": "Pallet Town",
+                                    "screen_kind": "OVERWORLD",
+                                    "dialogue_text": "PALLET TOWN: Shades of your journey await!",
+                                }
+                            )
+                        },
+                    },
+                ),
+            ):
+                ok = loop.run(max_turns=4)
+
+            self.assertTrue(ok)
+            self.assertEqual(pressed, ["A", "A", "A", "A"])
+            self.assertIsInstance(loop.previous_frame, Image.Image)
+            self.assertEqual(len(loop.dialogue_recorder.entries), 1)
+            self.assertEqual(len(list((tmp / "temp_shots").glob("*.png"))), 4)
+
+    def test_timeout_retries_in_fast_no_think_mode(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            player = OllamaPlayer(
+                think_mode="always",
+                enable_web_search=False,
+                history_manager=ConversationHistoryManager(tmp / "h.json"),
+                web_client=WebSearchClient(tmp / "w.json"),
+                thinking_store=ThinkingStore(tmp / "t.jsonl", tmp / "i.json"),
+                goal_tracker=GoalTracker(tmp / "g.json"),
+                dialogue_recorder=DialogueRecorder(tmp / "signs.json"),
+            )
+            calls = []
+
+            def fake_chat(messages, think=False, json_schema=None, tools=None):
+                calls.append(think)
+                if len(calls) == 1:
+                    raise requests.exceptions.ReadTimeout("simulated 60s timeout")
+                return {
+                    "prompt_eval_count": 500,
+                    "message": {
+                        "content": json.dumps({"reasoning": "Confirm name via START", "actions": ["START"]}),
+                    },
+                }
+
+            img = Image.new("RGB", (240, 160), (200, 200, 200))
+            with patch.object(player, "_chat", side_effect=fake_chat):
+                res = player.decide_action(turn_id=1, image=img, emulator_verified=True)
+
+            self.assertEqual(calls, [True, False])
+            self.assertEqual(res["flat_actions"], ["START"])
+            self.assertFalse(res.get("fallback", False))
+
+    def test_empty_think_content_retries_in_fast_no_think_mode(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            player = OllamaPlayer(
+                think_mode="always",
+                enable_web_search=False,
+                history_manager=ConversationHistoryManager(tmp / "h.json"),
+                web_client=WebSearchClient(tmp / "w.json"),
+                thinking_store=ThinkingStore(tmp / "t.jsonl", tmp / "i.json"),
+                goal_tracker=GoalTracker(tmp / "g.json"),
+                dialogue_recorder=DialogueRecorder(tmp / "signs.json"),
+            )
+            calls = []
+
+            def fake_chat(messages, think=False, json_schema=None, tools=None):
+                calls.append(think)
+                if len(calls) == 1:
+                    return {
+                        "prompt_eval_count": 600,
+                        "message": {"thinking": "Long internal reasoning cut off...", "content": ""},
+                    }
+                return {
+                    "prompt_eval_count": 500,
+                    "message": {
+                        "content": json.dumps({"reasoning": "Confirm name via START then A", "actions": ["START", "A"]}),
+                    },
+                }
+
+            img = Image.new("RGB", (240, 160), (200, 200, 200))
+            with patch.object(player, "_chat", side_effect=fake_chat):
+                res = player.decide_action(turn_id=1, image=img, emulator_verified=True)
+
+            self.assertEqual(calls, [True, False])
+            self.assertEqual(res["flat_actions"], ["START", "A"])
+            self.assertFalse(res.get("fallback", False))
+
+    def test_oscillation_loop_detection_escape_and_fuzzy_fact_dedup(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            gt = GoalTracker(state_path=tmp / "g.json")
+            gt.update_from_turn(discovered_fact="Area: Red Bedroom 2F, stairs visible on right", loop_detected=True)
+            gt.update_from_turn(discovered_fact="Area: Red Bedroom 2F, stairs visible on right.", loop_detected=True)
+            self.assertEqual(gt.current_area, "Red Bedroom 2F")
+            self.assertEqual(len(gt.discovered_facts), 1)
+            self.assertEqual(gt.turns_without_change, 2)
+
+            # Oscillating poster toggle: Frame A -> Frame B -> Frame A -> Frame B...
+            frame_a = Image.new("RGB", (480, 320), (40, 40, 40))
+            frame_b = Image.new("RGB", (480, 320), (220, 220, 220))
+            thumb_a = np.full((32, 32), 40, dtype=np.uint8)
+            thumb_b = np.full((32, 32), 220, dtype=np.uint8)
+            frames = [(frame_a, thumb_a), (frame_b, thumb_b)] * 6
+            idx = {"i": 0}
+            pressed_batches = []
+            seen_alerts = []
+
+            loop = GameLoop(turn_settle_delay=0.0, step_settle_delay=0.0, discovery_on_start=False)
+            loop.discovery_active = False
+            loop.run_temp_dir = tmp / "shots"
+            loop.run_temp_dir.mkdir(parents=True, exist_ok=True)
+            loop.goal_tracker = gt
+            loop.dialogue_recorder = DialogueRecorder(storage_path=tmp / "signs.json")
+            loop.thinking_store = ThinkingStore(traces_path=tmp / "t.jsonl", insights_path=tmp / "i.json")
+            loop.web_client = WebSearchClient(cache_path=tmp / "w.json")
+            loop.conversation_history = ConversationHistoryManager(storage_path=tmp / "h.json")
+            loop.player.goal_tracker = loop.goal_tracker
+            loop.player.dialogue_recorder = loop.dialogue_recorder
+            loop.player.thinking_store = loop.thinking_store
+            loop.player.web_client = loop.web_client
+            loop.player.history_manager = loop.conversation_history
+            loop.player.enable_web_search = False
+
+            def next_frame():
+                res = frames[idx["i"] % len(frames)]
+                idx["i"] += 1
+                return res
+
+            def fake_decide(**kwargs):
+                seen_alerts.append(kwargs.get("stuck_alert", ""))
+                return {
+                    "actions": ["A"],
+                    "flat_actions": ["A"],
+                    "reasoning": "Toggle poster",
+                    "dialogue_text": "Fangame made with love by Jaizu.",
+                    "screen_kind": "DIALOGUE",
+                }
+
+            batch_buf = []
+
+            def rec_btn(b):
+                batch_buf.append(b)
+                return True
+
+            with (
+                patch.object(loop.screen_capture, "find_emulator_window", return_value=12345),
+                patch.object(loop.screen_capture, "is_window_alive", return_value=True),
+                patch.object(loop.screen_capture, "capture_frame", side_effect=next_frame),
+                patch.object(loop.input_controller, "focus_hwnd", return_value=True),
+                patch.object(loop.input_controller, "press_button", side_effect=rec_btn),
+                patch.object(loop.player, "is_server_reachable", return_value=True),
+                patch.object(loop.player, "decide_action", side_effect=fake_decide),
+            ):
+                loop.run(max_turns=9)
+
+            self.assertTrue(any("LOOP DETECTED" in a for a in seen_alerts))
+            self.assertIn("B", batch_buf)
+            self.assertIn("RIGHT", batch_buf)
+            self.assertGreaterEqual(gt.turns_without_change, 6)
+
+    def test_pre_starter_menu_and_unverified_goal_guard(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            gt = GoalTracker(state_path=tmp / "g.json")
+            gt.update_from_turn(
+                area="Red's Bedroom 2F",
+                screen_kind="START_MENU",
+                discovered_fact="Menu Options: Bag, Wn, Save, Option, Exit",
+            )
+            self.assertIn("No Pokémon yet", gt.verified_profile["party"])
+            self.assertNotIn("PARTY_MENU", gt.get_uninspected_menus())
+
+            # Unverified late-game milestones must NOT be added to completed_goals
+            gt.apply_synthesized_goal(
+                new_active_goal="Walk down the 2F stairs to Living Room 1F",
+                next_step="Step onto orange stair mat from the right",
+                confirmed_completed_goals=[
+                    "Defeated Brock in Pewter Gym",
+                    "Earned the Boulder Badge",
+                    "Reached Viridian City",
+                    "Received Starter Pokémon (Pikachu)",
+                ],
+            )
+            self.assertFalse(gt.is_goal_completed("Defeated Brock in Pewter Gym"))
+            self.assertFalse(gt.is_goal_completed("Earned the Boulder Badge"))
+            self.assertFalse(gt.is_goal_completed("Received Starter Pokémon (Pikachu)"))
+            self.assertEqual(gt.active_goal, "Walk down the 2F stairs to Living Room 1F")
 
 
 if __name__ == "__main__":

@@ -14,7 +14,12 @@ GBA Controls (respond in `actions` with 1 to 5 button presses from ONLY these 8)
 Core Gameplay & Learning Principles:
 1. Self-Discovery Over Guessing:
    - Press `A` to read signs, talk to NPCs, interact with tables/PCs/items, and advance text bubbles.
-   - If you just loaded a save, are unsure of your badges/items/team, or think a goal might already be done, press `START` to check Trainer Card (badges), Party, Bag, or Pokédex, then `B` to exit.
+   - Always identify `current_area` honestly from what you actually see (e.g. "Red's Bedroom 2F", "Red's House 1F", "Pallet Town", "Oak's Lab"). NEVER assume you are in Pewter City / Oak's Lab unless the visual room/sign confirms it.
+   - Indoor Floor & Stairs Rule: A room with a **bed + PC + TV/SNES + stairs** is **2F Upstairs Bedroom** (NOT ground floor — there is NO front door on 2F!). Look at stair railings carefully: you CANNOT walk through a white railing; walk around to the open side of the orange/red stair doormat to step down to 1F, then walk to the bottom-center red doormat in 1F to exit outdoors.
+   - Pre-Starter Menu Rule: If Start Menu only shows `Bag / <Name> / Save / Option / Exit` (no Pokémon or Pokédex option), you haven't received your starter yet—press `B` to close and go downstairs/outside.
+   - On a "Your name?" / Naming screen, send `["START", "A"]` (`START` highlights `OK`, then `A` confirms it!).
+   - If you get `[LOOP DETECTED]` or realize you keep opening the same poster/sign/menu, press `B` to close text and walk AWAY in a clear open direction instead of pressing `A` or pushing into the same wall!
+   - If unsure of your badges/items/team, press `START` to inspect Trainer Card / Party / Bag / Pokédex, then `B` to exit.
    - Record concrete verified menu/sign discoveries in `discovered_fact` (e.g. "Badges: 1 Boulder", "Team: Pikachu Lv12", "Have Oak's Parcel") and `current_area`.
 2. Lossless Text Capture:
    - Whenever ANY sign, speech bubble, battle prompt, or important menu info is visible, copy it verbatim into `dialogue_text` so Python archives it permanently.

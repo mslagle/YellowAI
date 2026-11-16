@@ -157,23 +157,88 @@ class GoalTracker:
         )
         if not combined:
             return
+        low = combined.lower()
 
-        if sk == "TRAINER_CARD" or "badge" in combined.lower() or "money" in combined.lower():
+        # Pre-starter Start Menu (only Bag, Player Name, Save, Option, Exit — no Pokémon/Pokédex yet)
+        if (
+            sk == "START_MENU"
+            and "bag" in low
+            and "save" in low
+            and "pokédex" not in low
+            and "pokedex" not in low
+            and "pokémon" not in low
+            and "pokemon" not in low
+        ):
+            if "Unknown" in str(self.verified_profile.get("badges", "")):
+                self.verified_profile["badges"] = "0 Badges (pre-starter Start Menu)"
+            if "Unknown" in str(self.verified_profile.get("party", "")):
+                self.verified_profile["party"] = "No Pokémon yet (Start Menu has no Party option)"
+            if "Unknown" in str(self.verified_profile.get("pokedex", "")):
+                self.verified_profile["pokedex"] = "Not unlocked yet"
+            for m_key in ("PARTY_MENU", "POKEDEX"):
+                if m_key not in self.inspected_menus_this_run:
+                    self.inspected_menus_this_run.append(m_key)
+
+        if sk == "TRAINER_CARD" or "badge" in low or "money" in low:
             self.verified_profile["badges"] = combined[:180]
             if "TRAINER_CARD" not in self.inspected_menus_this_run:
                 self.inspected_menus_this_run.append("TRAINER_CARD")
-        if sk == "PARTY_MENU" or any(w in combined.lower() for w in ("party:", "team:", "lv", "hp ")):
+        if sk == "PARTY_MENU" or any(w in low for w in ("party:", "team:", "lv", "hp ")):
             self.verified_profile["party"] = combined[:180]
             if "PARTY_MENU" not in self.inspected_menus_this_run:
                 self.inspected_menus_this_run.append("PARTY_MENU")
-        if sk == "BAG_MENU" or any(w in combined.lower() for w in ("bag:", "key item", "poké ball", "poke ball", "potion", "parcel")):
+        if sk == "BAG_MENU" or any(w in low for w in ("bag:", "key item", "poké ball", "poke ball", "potion", "parcel")):
             self.verified_profile["bag"] = combined[:180]
             if "BAG_MENU" not in self.inspected_menus_this_run:
                 self.inspected_menus_this_run.append("BAG_MENU")
-        if sk == "POKEDEX" or "pokédex" in combined.lower() or "pokedex" in combined.lower() or "seen" in combined.lower():
+        if sk == "POKEDEX" or "pokédex" in low or "pokedex" in low or "seen" in low:
             self.verified_profile["pokedex"] = combined[:180]
             if "POKEDEX" not in self.inspected_menus_this_run:
                 self.inspected_menus_this_run.append("POKEDEX")
+
+    def _is_plausibly_verified_completion(self, candidate: str) -> bool:
+        """
+        Prevents hallucinated goal-dropping of mid/late-game milestones when verified_profile,
+        area_history, and discovered_facts show zero supporting evidence.
+        """
+        low = (candidate or "").strip().lower()
+        if not low:
+            return False
+        # Always allow dropping a goal we actually pursued cleanly
+        if self._goals_match(candidate, self.active_goal):
+            return True
+
+        evidence = " ".join(
+            [
+                self.current_area,
+                " ".join(self.area_history),
+                " ".join(self.discovered_facts),
+                " ".join(str(v) for v in self.verified_profile.values()),
+            ]
+        ).lower()
+
+        milestone_guards = [
+            ("brock", ("brock", "boulder", "pewter gym")),
+            ("badge", ("badge",)),
+            ("misty", ("misty", "cascade", "cerulean")),
+            ("hm0", ("hm0", "cut", "flash", "surf")),
+            ("viridian", ("viridian",)),
+            ("pewter", ("pewter",)),
+            ("cerulean", ("cerulean",)),
+            ("pallet town", ("pallet town", "route 1", "viridian")),
+            ("pikachu", ("pikachu", "starter", "lv")),
+            ("starter", ("pikachu", "starter", "lv")),
+            ("oak", ("oak",)),
+            ("mom", ("mom", "downstairs", "1f", "living room")),
+        ]
+        for trigger, required_any in milestone_guards:
+            if trigger in low:
+                # Never mark early/mid milestones completed if profile explicitly says pre-starter or evidence is absent
+                if "no pokémon yet" in evidence and trigger in ("brock", "badge", "misty", "viridian", "pewter", "cerulean", "pikachu", "starter", "hm0"):
+                    return False
+                if not any(req in evidence for req in required_any):
+                    return False
+        return True
 
     def get_uninspected_menus(self) -> List[str]:
         return [m for m in DISCOVERY_MENU_TARGETS if m not in self.inspected_menus_this_run]
@@ -201,9 +266,9 @@ class GoalTracker:
         grand_goal: Optional[str] = None,
         confirmed_completed_goals: Optional[List[str]] = None,
     ) -> None:
-        """Drops any confirmed-completed goals and commits a freshly researched objective."""
+        """Drops only plausibly verified completed goals and commits a freshly researched objective."""
         for done in (confirmed_completed_goals or []):
-            if isinstance(done, str) and done.strip():
+            if isinstance(done, str) and done.strip() and self._is_plausibly_verified_completion(done.strip()):
                 self.complete_goal(done.strip())
 
         if grand_goal and grand_goal.strip() and grand_goal.strip().upper() != "NULL":
@@ -228,22 +293,28 @@ class GoalTracker:
         next_step: Optional[str] = None,
         grand_goal_update: Optional[str] = None,
         screen_changed: bool = True,
+        loop_detected: bool = False,
+        new_dialogue_seen: bool = False,
     ) -> None:
         progress = False
-        if area and area.strip() and area.strip().upper() != "NULL":
-            a_clean = area.strip()
-            if a_clean != self.current_area:
-                self.current_area = a_clean
-                if not self.area_history or self.area_history[-1] != a_clean:
-                    self.area_history.append(a_clean)
-                    self.area_history = self.area_history[-8:]
-                progress = True
+        resolved_area = area.strip() if (area and area.strip() and area.strip().upper() != "NULL") else ""
+        if not resolved_area and discovered_fact:
+            m_area = re.search(r"Area:\s*([^,|.\n]+)", discovered_fact, re.IGNORECASE)
+            if m_area:
+                resolved_area = m_area.group(1).strip()
+
+        if resolved_area and resolved_area != self.current_area:
+            self.current_area = resolved_area
+            if not self.area_history or self.area_history[-1] != resolved_area:
+                self.area_history.append(resolved_area)
+                self.area_history = self.area_history[-8:]
+            progress = True
 
         self.record_menu_observation(screen_kind=screen_kind, discovered_fact=discovered_fact, dialogue_text=dialogue_text)
 
         if discovered_fact and discovered_fact.strip() and discovered_fact.strip().upper() != "NULL":
             fact = " ".join(discovered_fact.strip().split())
-            if not any(fact.lower() == f.lower() for f in self.discovered_facts):
+            if not any(self._goals_match(fact, f) for f in self.discovered_facts):
                 self.discovered_facts.append(fact)
                 self.discovered_facts = self.discovered_facts[-25:]
                 progress = True
@@ -262,7 +333,12 @@ class GoalTracker:
             if not self.is_goal_completed(next_step.strip()):
                 self.next_step = next_step.strip()
 
-        self.turns_without_change = 0 if (progress or screen_changed) else (self.turns_without_change + 1)
+        if loop_detected:
+            self.turns_without_change += 1
+        elif progress or new_dialogue_seen or screen_changed:
+            self.turns_without_change = 0
+        else:
+            self.turns_without_change += 1
         self.save()
 
     def is_drifting(self, threshold: int = 10) -> bool:

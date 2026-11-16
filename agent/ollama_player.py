@@ -48,7 +48,10 @@ class TurnDecision(BaseModel):
         max_length=5,
         description="REQUIRED: 1 to 5 GBA buttons to press this turn (UP, DOWN, LEFT, RIGHT, A, B, START, SELECT).",
     )
-    current_area: Optional[str] = Field(default=None, description="Observed town, route, building, or menu name.")
+    current_area: Optional[str] = Field(
+        default=None,
+        description="Observed location name (e.g. 'Red Bedroom 2F', 'Red House 1F', 'Pallet Town', 'Oak Lab', 'Route 1'). Populate every turn when identifiable.",
+    )
     screen_kind: Optional[str] = Field(
         default=None,
         description="Observed screen category: OVERWORLD, START_MENU, TRAINER_CARD, PARTY_MENU, BAG_MENU, POKEDEX, DIALOGUE, BATTLE, or TITLE_OR_MENU.",
@@ -208,7 +211,8 @@ class OllamaPlayer:
             return True
         if self.think_mode == "never":
             return False
-        return bool(stuck_alert) or turn_id <= 2 or (turn_id % 8 == 0)
+        # Periodic reflection turns; fast turns stay responsive and retry without think if truncated
+        return turn_id > 0 and (turn_id % 10 == 0)
 
     def _chat(
         self,
@@ -217,12 +221,22 @@ class OllamaPlayer:
         json_schema: Optional[Dict[str, Any]] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
+        num_predict = (
+            getattr(config, "OLLAMA_MAX_TOKENS_THINK", 900)
+            if think
+            else getattr(config, "OLLAMA_MAX_TOKENS_FAST", 450)
+        )
         payload: Dict[str, Any] = {
             "model": self.model_id,
             "messages": messages,
             "stream": False,
             "think": think,
-            "options": {"temperature": self.temperature, "num_ctx": self.num_ctx},
+            "keep_alive": "15m",
+            "options": {
+                "temperature": self.temperature,
+                "num_ctx": self.num_ctx,
+                "num_predict": num_predict,
+            },
         }
         if json_schema is not None:
             payload["format"] = json_schema
@@ -331,8 +345,9 @@ class OllamaPlayer:
             f"[Online Research Summary]:\n{web_res.get('summary', '') or 'No new web results.'}\n"
             f"{extra_context}\n\n"
             "Rules:\n"
-            "1. List ANY goal already proven done by Badges/Party/Bag/Pokédex/Signs inside `confirmed_completed_goals`.\n"
-            "2. Choose ONE clear, immediate `new_active_goal` that has NOT been completed yet."
+            "1. List a goal in `confirmed_completed_goals` ONLY if it was our active_goal OR is directly proven done by "
+            "Verified Menu Profile / Signs (e.g. actual Badge count or item in Bag). NEVER mark unvisited gyms, towns, badges, or starter Pokémon complete!\n"
+            "2. Choose ONE clear, immediate `new_active_goal` matching the exact room/town visible right now."
         )
 
         messages: List[Dict[str, Any]] = [
@@ -413,11 +428,39 @@ class OllamaPlayer:
         use_think = self._should_think(turn_id, stuck_alert)
 
         try:
-            data = self._chat(messages=messages, think=use_think, json_schema=schema)
-            msg = data.get("message", {})
-            raw_text = (msg.get("content") or "").strip()
-            thinking_text = (msg.get("thinking") or "").strip()
-            result = self._parse_json(raw_text)
+            msg: Dict[str, Any] = {}
+            raw_text = ""
+            thinking_text = ""
+            result: Dict[str, Any] = {}
+
+            try:
+                data = self._chat(messages=messages, think=use_think, json_schema=schema)
+                msg = data.get("message", {})
+                raw_text = (msg.get("content") or "").strip()
+                thinking_text = (msg.get("thinking") or "").strip()
+                result = self._parse_json(raw_text)
+            except requests.exceptions.Timeout:
+                if not (use_think or len(images) > 1):
+                    raise
+                print(f"[OllamaPlayer] Turn {turn_id} timed out with think={use_think}/imgs={len(images)}; retrying fast mode...")
+
+            # If thinking hit token limit (empty content) or timed out, retry cleanly with think=False
+            if not result and (use_think or len(images) > 1):
+                if thinking_text and not raw_text:
+                    print(f"[OllamaPlayer] Turn {turn_id} exhausted token budget in <think>; retrying fast mode (think=False)...")
+                use_think = False
+                fast_messages = list(messages[:-1]) + [
+                    {
+                        "role": "user",
+                        "content": prompt_text,
+                        "images": [images[-1]],
+                    }
+                ]
+                data = self._chat(messages=fast_messages, think=False, json_schema=schema)
+                msg = data.get("message", {})
+                raw_text = (msg.get("content") or "").strip()
+                result = self._parse_json(raw_text)
+
             if not result:
                 raise ValueError(f"Invalid JSON from Ollama: {raw_text[:160]}")
 

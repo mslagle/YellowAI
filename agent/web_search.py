@@ -110,7 +110,14 @@ class WebSearchClient:
         error_msg: Optional[str] = None
         try:
             from ddgs import DDGS
-            raw = list(DDGS().text(clean_query, max_results=max_results))
+            raw = []
+            for backend_name in ("google", "bing", "auto", "duckduckgo"):
+                try:
+                    raw = list(DDGS().text(clean_query, max_results=max_results, backend=backend_name))
+                except Exception:
+                    raw = []
+                if raw:
+                    break
             for r in raw:
                 results.append({
                     "title": str(r.get("title", "")).strip(),

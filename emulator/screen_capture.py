@@ -185,6 +185,10 @@ class ScreenCapture:
         except Exception:
             return False
 
+    def is_emulator_alive(self) -> bool:
+        """Alias for `is_window_alive()`."""
+        return self.is_window_alive()
+
     def _capture_frame_worker(self) -> Tuple[Optional[Image.Image], Optional[np.ndarray]]:
         self._attach_desktop()
         hwnd = self.target_hwnd
