@@ -222,6 +222,7 @@ __marimo__/
 # YellowAI Specific
 debug_captures/
 logs/
+temp/
 mGBA-0.10.5-win64/
 state/
 tests/fixtures/recharged_yellow/battle_move_select.png

@@ -1,117 +1,61 @@
 """
-Configuration settings for YellowAI: Gemini 3.5 Flash playing Pokémon Yellow Recharged in mGBA.
+Central Configuration for YellowAI (Local Ollama VLM Edition).
+Runs Pokémon Recharged Yellow via mGBA using only local Ollama (`qwen3.5:9b`).
 """
 
-from pathlib import Path
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
+BASE_DIR = Path(__file__).resolve().parent
+load_dotenv(BASE_DIR / ".env")
 
-# Base directories
-BASE_DIR = Path(__file__).parent.resolve()
+# Directories
 STATE_DIR = BASE_DIR / "state"
-OVERLAY_DIR = BASE_DIR / "overlay"
-DEBUG_CAPTURES_DIR = BASE_DIR / "debug_captures"
 LOGS_DIR = BASE_DIR / "logs"
+TEMP_DIR = BASE_DIR / "temp"
+TEMP_SCREENSHOTS_DIR = TEMP_DIR / "screenshots"
 
-STATE_DIR.mkdir(parents=True, exist_ok=True)
-OVERLAY_DIR.mkdir(parents=True, exist_ok=True)
-DEBUG_CAPTURES_DIR.mkdir(parents=True, exist_ok=True)
-LOGS_DIR.mkdir(parents=True, exist_ok=True)
+# Persistent state files
+CONVERSATION_HISTORY_FILE = STATE_DIR / "conversation_history.json"
+SIGNS_AND_SPEECH_FILE = STATE_DIR / "signs_and_speech.json"
+THINKING_TRACES_FILE = STATE_DIR / "thinking_traces.jsonl"
+THINKING_INSIGHTS_FILE = STATE_DIR / "thinking_insights.json"
+WEB_KNOWLEDGE_CACHE_FILE = STATE_DIR / "web_knowledge_cache.json"
+GOAL_STATE_FILE = STATE_DIR / "goal_state.json"
 
-# State files & Log capture file
-MEMORY_FILE = STATE_DIR / "session_memory.json"
-OVERLAY_STATE_FILE = OVERLAY_DIR / "overlay_state.json"
-OVERLAY_JS_FILE = OVERLAY_DIR / "overlay_state.js"
-LAST_CAPTURE_FILE = LOGS_DIR / "last_capture.png"
-PREVIOUS_CAPTURE_FILE = LOGS_DIR / "previous_capture.png"
+# Bundled mGBA Emulator & ROM
+MGBA_DIR = BASE_DIR / "mGBA-0.10.5-win64"
+MGBA_EXE = MGBA_DIR / "mGBA.exe"
+DEFAULT_ROM_PATH = MGBA_DIR / "games" / "rchrgd yllw v1.8.0.gba"
+DEFAULT_SAVESTATE_PATH = MGBA_DIR / "games" / "rchrgd yllw v1.8.0.ss0"
 
-# Emulator Window Configuration
-# mGBA title format is typically "mGBA - [Rom Name]" or "mGBA"
-EMULATOR_WINDOW_TITLE_KEYWORDS = ["mGBA", "Recharged", "Yellow", "Pokemon", "Pokémon"]
+for _d in (STATE_DIR, LOGS_DIR, TEMP_DIR, TEMP_SCREENSHOTS_DIR):
+    _d.mkdir(parents=True, exist_ok=True)
 
-# Target Capture Resolution for Gemini (clean aspect ratio 3:2 matching GBA)
-CAPTURE_TARGET_WIDTH = 480
-CAPTURE_TARGET_HEIGHT = 320
-
-# Model Provider Backend ("hybrid", "gemini", "bionic", "lmstudio", or "ollama")
-LLM_BACKEND = os.getenv("LLM_BACKEND", "hybrid").lower().strip()
-
-# Hybrid Mode Configuration (used when LLM_BACKEND="hybrid")
-HYBRID_LOCAL_BACKEND = os.getenv("HYBRID_LOCAL_BACKEND", "bionic").lower().strip()  # "bionic" or "ollama"
-HYBRID_ESCALATE_ON_STUCK_TURNS = int(os.getenv("HYBRID_ESCALATE_ON_STUCK_TURNS", "2"))
-HYBRID_ESCALATE_ON_BATTLES = os.getenv("HYBRID_ESCALATE_ON_BATTLES", "false").lower() == "true"
-HYBRID_CHECKPOINT_TURNS = int(os.getenv("HYBRID_CHECKPOINT_TURNS", "25"))  # 0 to disable periodic cloud check-in
-
-# Gemini Model Settings (Gemini 3.5 Flash)
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL_ID = os.getenv("GEMINI_MODEL_ID", "gemini-3.5-flash")
-# Set thinking_budget=0 for fastest sub-second turn latency on stream
-GEMINI_THINKING_BUDGET = int(os.getenv("GEMINI_THINKING_BUDGET", "0"))
-
-# Local Ollama Settings (100% Free / Offline VLM)
+# Local Ollama VLM Configuration (RTX 3060 12GB VRAM)
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL_ID = os.getenv("OLLAMA_MODEL_ID", "qwen3.5")
+OLLAMA_MODEL_ID = os.getenv("OLLAMA_MODEL_ID", "qwen3.5:9b")
+OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "16384"))
+OLLAMA_TIMEOUT = float(os.getenv("OLLAMA_TIMEOUT", "120.0"))
+OLLAMA_THINK_MODE = os.getenv("OLLAMA_THINK_MODE", "auto")  # auto | always | never
+OLLAMA_SAVE_THINKING_TRACES = os.getenv("OLLAMA_SAVE_THINKING_TRACES", "true").lower() == "true"
 
-# Local Bionic / LM Studio Settings (100% Free / Port 1234)
-BIONIC_BASE_URL = os.getenv("BIONIC_BASE_URL", "http://localhost:1234/v1")
-BIONIC_MODEL_ID = os.getenv("BIONIC_MODEL_ID", "default")
-BIONIC_TIMEOUT = float(os.getenv("BIONIC_TIMEOUT", "15.0"))  # Seconds to wait before escalating in hybrid mode
+# Multi-Turn Conversation History & Compaction
+OLLAMA_HISTORY_MAX_TURNS = int(os.getenv("OLLAMA_HISTORY_MAX_TURNS", "18"))
+OLLAMA_HISTORY_KEEP_RECENT = int(os.getenv("OLLAMA_HISTORY_KEEP_RECENT", "6"))
+OLLAMA_HISTORY_COMPACT_TOKENS = int(os.getenv("OLLAMA_HISTORY_COMPACT_TOKENS", "10000"))
 
-# TTS Voice Commentary Configuration ("edge", "sapi", or "none")
-TTS_PROVIDER = os.getenv("TTS_PROVIDER", "edge").lower().strip()
+# Autonomous Web Search & Discovery-First Planning
+OLLAMA_ENABLE_WEB_SEARCH = os.getenv("OLLAMA_ENABLE_WEB_SEARCH", "true").lower() == "true"
+OLLAMA_AUTO_PLAN_ON_STARTUP = os.getenv("OLLAMA_AUTO_PLAN_ON_STARTUP", "true").lower() == "true"
+OLLAMA_DISCOVERY_ON_START = os.getenv("OLLAMA_DISCOVERY_ON_START", "true").lower() == "true"
+OLLAMA_MAX_DISCOVERY_TURNS = int(os.getenv("OLLAMA_MAX_DISCOVERY_TURNS", "12"))
 
-# Background Input & Window Focus Configuration
-# Options: "postmessage" (Win32 background messages, no focus needed),
-#          "lua_socket" (mGBA Lua bridge socket, falls back to postmessage),
-#          "foreground" (legacy SetForegroundWindow + pydirectinput)
-BACKGROUND_INPUT_MODE = os.getenv("BACKGROUND_INPUT_MODE", "postmessage").lower().strip()
-LUA_BRIDGE_HOST = os.getenv("LUA_BRIDGE_HOST", "127.0.0.1")
-LUA_BRIDGE_PORT = int(os.getenv("LUA_BRIDGE_PORT", "8888"))
+# mGBA Window, Resolution & Input Controls
+EMULATOR_WINDOW_TITLE_KEYWORDS = ["mGBA", "Recharged Yellow", "Pokemon", "Yellow"]
+TARGET_RESOLUTION = (480, 320)  # 2x GBA (240x160)
 
-# Tier 0 Reflexes & Token Optimization
-ENABLE_TIER0_REFLEXES = os.getenv("ENABLE_TIER0_REFLEXES", "true").lower() == "true"
-SEND_PREVIOUS_IMAGE_ONLY_WHEN_STUCK = os.getenv("SEND_PREVIOUS_IMAGE_ONLY_WHEN_STUCK", "true").lower() == "true"
-
-# Rolling Dialogue Log Settings
-MAX_DIALOGUE_HISTORY = int(os.getenv("MAX_DIALOGUE_HISTORY", "20"))
-DIALOGUE_PROMPT_RECENT_COUNT = int(os.getenv("DIALOGUE_PROMPT_RECENT_COUNT", "4"))
-
-# Turn Timing and Delays (in seconds)
-BUTTON_HOLD_DURATION = float(os.getenv("BUTTON_HOLD_DURATION", "0.05"))  # ~3 frames hold at 60fps (~16.7ms/frame)
-STEP_SETTLE_DELAY = float(os.getenv("STEP_SETTLE_DELAY", "0.25"))        # 0.05s hold + 0.25s settle = 0.30s (> 16-frame 0.267s GBA walk cycle)
-TURN_SETTLE_DELAY = float(os.getenv("TURN_SETTLE_DELAY", "0.25"))        # Paced delay between turns (default: 0.25s)
-MAX_BATCH_ACTIONS = int(os.getenv("MAX_BATCH_ACTIONS", "6"))       # Maximum steps in a batch action sequence
-ANTI_STUCK_CONSECUTIVE_THRESHOLD = 6  # If screen unchanged for N turns, take recovery step
-
-# Last-Ditch Effort / Tactical Rescue Configuration
-ENABLE_RESCUE_THINKING = os.getenv("ENABLE_RESCUE_THINKING", "true").lower() == "true"
-RESCUE_THINKING_BUDGET = int(os.getenv("RESCUE_THINKING_BUDGET", "2048"))  # Medium-sized thinking budget (2048 tokens)
-RESCUE_ENABLE_WEB_SEARCH = os.getenv("RESCUE_ENABLE_WEB_SEARCH", "true").lower() == "true"  # Search internet for clues
-RESCUE_STUCK_THRESHOLD = int(os.getenv("RESCUE_STUCK_THRESHOLD", "5"))    # Consecutive blocked turns before rescue
-RESCUE_COOLDOWN_TURNS = 6                                                 # Minimum turns between rescue calls
-
-# Battle Strategy & Encounter Thinking Configuration
-ENABLE_BATTLE_THINKING = os.getenv("ENABLE_BATTLE_THINKING", "true").lower() == "true"
-BATTLE_THINKING_BUDGET = int(os.getenv("BATTLE_THINKING_BUDGET", "1024"))  # Tactical thinking budget for battle start & enemy switches
-
-# Cadence Intervals
-CADENCE_BUTTON = 1              # Every turn
-CADENCE_THOUGHT = 5             # Every 5 turns -> TTS quote
-CADENCE_SHORT_MEMORY = 10       # Every 10 turns -> Short-term memory
-CADENCE_MEDIUM_MEMORY = 50      # Every 50 turns -> Medium-term memory
-CADENCE_LONG_MEMORY = 100       # Every 100 turns -> Long-term memory
-
-# Default mGBA Keyboard Controls (can be adjusted to match emulator settings)
-# In mGBA: Tools -> Settings -> Keybindings
-# D-pad: Up, Down, Left, Right
-# A: X
-# B: Z
-# L: A
-# R: S
-# Start: Enter
-# Select: Backspace
 KEY_MAPPINGS = {
     "UP": "up",
     "DOWN": "down",
@@ -119,15 +63,15 @@ KEY_MAPPINGS = {
     "RIGHT": "right",
     "A": "x",
     "B": "z",
-    "START": "enter",
     "SELECT": "backspace",
-    "WAIT": None
+    "START": "enter",
 }
 
-# High-Quality Natural TTS Voices (via Edge Neural TTS)
-TTS_VOICE = os.getenv("TTS_VOICE", "en-US-AndrewMultilingualNeural")
-TTS_SPEECH_RATE = "+10%"
+INPUT_HOLD_DURATION = 0.14
+STEP_SETTLE_DELAY = 0.25
+TURN_SETTLE_DELAY = 0.25
+MAX_BATCH_ACTIONS = 5
 
-# OBS Stream Overlay Server
-OVERLAY_PORT = 8080
-ENABLE_OVERLAY_SERVER = True
+BACKGROUND_INPUT_MODE = os.getenv("BACKGROUND_INPUT_MODE", "postmessage")
+MGBA_LUA_HOST = "127.0.0.1"
+MGBA_LUA_PORT = 8888

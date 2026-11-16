@@ -1,140 +1,27 @@
-# YellowAI ⚡🎮
-**Autonomous Gemini Flash Pokémon Yellow Recharged Streamer**
+# YellowAI — Local Ollama VLM Agent for Pokémon Recharged Yellow
 
-YellowAI is an AI agent that plays *Pokémon Recharged Yellow* (GBA) live on stream using **Gemini Flash**. It analyzes the game screen every turn, takes actions, maintains a 3-tiered hierarchical memory, and streams real-time commentary through a local neural text-to-speech engine.
+Compact, 100% local vision AI running **Ollama (`qwen3.5:9b`)** against bundled **mGBA 0.10.5** (`rchrgd yllw v1.8.0.gba`). Zero cloud APIs.
 
----
+## Features
+- **Local Vision + Strict GBA Controls**: Sends each turn's screenshot to `qwen3.5:9b` and executes returned GBA button presses (`UP`, `DOWN`, `LEFT`, `RIGHT`, `A`, `B`, `SELECT`, `START`).
+- **Temp Screenshot Archive**: Saves every turn's screenshot to `temp/screenshots/run_<id>/turn_NNNNN.png`.
+- **Multi-Turn Memory & Compaction**: Persists active turns, compacted episode summaries, and past-run continuity across sessions in `state/conversation_history.json`.
+- **Self-Discovery + Goal Dropping**: Learns game progress from signs, NPCs, in-game Start/Trainer Card/Bag/Party/Pokédex checks, and internet search, while permanently tombstoning completed goals in `state/goal_state.json`.
+- **Lossless Sign & Speech Archival**: Records all seen signs, dialogue, and menu text untruncated in `state/signs_and_speech.json`.
+- **Thinking Persistence**: Archives raw `thinking` traces to `state/thinking_traces.jsonl` and recalls distilled strategic insights from `state/thinking_insights.json`.
+- **Free Internet Search**: Uses DuckDuckGo (`web_search` / `fetch_webpage`) via native Ollama tool calling with local caching (`state/web_knowledge_cache.json`).
 
-## 🔁 Turn Cadence & Memory Architecture
+## Usage
+```powershell
+# Double-click run.bat, OR run from PowerShell:
+.\.venv\Scripts\python.exe main.py --launch-mgba
 
-| Frequency | Output | Purpose |
-| :--- | :--- | :--- |
-| **Every Turn** | GBA Button (`A`, `B`, `UP`, etc.) | Advances gameplay frame by frame. |
-| **Every 5 Turns** | 1-Sentence Thought Quote | Sent to local neural TTS engine for live stream commentary. |
-| **Every 10 Turns** | Short-Term Memory | Tactical focus: immediate room, battle status, NPC dialogue. |
-| **Every 50 Turns** | Medium-Term Memory | Operational milestone: current town/route, gym target, party condition. |
-| **Every 100 Turns** | Long-Term Memory | Grand strategy: badges won, team lineup, overarching champion path. |
+# Launch mGBA standalone:
+.\.venv\Scripts\python.exe -m emulator.mgba_launcher
 
----
+# Run quick self-test (live Ollama vision + history + web search):
+.\.venv\Scripts\python.exe main.py --test-ollama
 
-## 🛠️ Setup & Installation
-
-### 1. Requirements
-Ensure Python 3.10+ is installed and install the required dependencies:
-```bash
-pip install -r requirements.txt
+# Reset saved state (optionally keep distilled insights & web cache):
+.\.venv\Scripts\python.exe reset_game.py --clear-logs --keep-wisdom
 ```
-
-### 2. Configure Environment
-Copy `.env.example` to `.env` and insert your Gemini API Key:
-```bash
-cp .env.example .env
-```
-Inside `.env`:
-```env
-GEMINI_API_KEY=your_actual_gemini_api_key
-GEMINI_MODEL_ID=gemini-3.5-flash
-GEMINI_THINKING_BUDGET=0
-```
-
-### 3. Emulator Controls Setup (mGBA recommended)
-Configure your emulator keys to match `config.py` (or edit `config.py` to match your emulator):
-- **D-Pad**: Arrow keys (`Up`, `Down`, `Left`, `Right`)
-- **A Button**: `x`
-- **B Button**: `z`
-- **Start**: `Enter`
-- **Select**: `Backspace`
-
----
-
-## 🚀 One-Click Launch (Recommended)
-
-Simply double-click or run:
-```bat
-run.bat
-```
-`run.bat` automatically:
-1. Creates the Python virtual environment (`.venv`) if not present.
-2. Restores and updates all required Python packages from `requirements.txt`.
-3. Generates `.env` from template if missing.
-4. Checks for an active **mGBA** emulator window.
-5. If **mGBA is not detected, it halts immediately** with instructions.
-6. Once mGBA is detected, launches the full Gemini 3.5 Flash streamer loop!
-
----
-
-## 🧪 Testing Subsystems
-
-Before launching the full loop, test each subsystem using the built-in CLI flags:
-
-### Test TTS Audio Commentary
-```bash
-python main.py --test-tts
-```
-*Synthesizes and speaks a sample greeting through your default audio device.*
-
-### Test Screen Capture
-```bash
-python main.py --test-capture
-```
-*Searches for the emulator window, grabs a frame, and saves it to `debug_captures/test_capture.png`.*
-
-### Test Input Injection
-```bash
-python main.py --test-input
-```
-*Focuses the emulator and presses button `A` after 2 seconds.*
-
----
-
-## 🚀 Running YellowAI
-
-Launch the player:
-```bash
-python main.py
-```
-
-### Useful CLI Options
-- `--backend <gemini|ollama|bionic|lmstudio>`: Choose intelligence backend (`gemini` for cloud, `ollama` for Ollama local VLM, or `bionic`/`lmstudio` for local server on port 1234).
-- `--ollama-model <MODEL>`: Local Ollama model ID (defaults to `qwen3.5`).
-- `--bionic-url <URL>`: Local OpenAI-compatible server URL (defaults to `http://localhost:1234/v1`).
-- `--max-turns <N>`: Run for a set number of turns (e.g. `python main.py --max-turns 100`).
-- `--no-tts`: Run silently without audio commentary.
-- `--reset-memory`: Reset stored short, medium, and long-term memory back to Pallet Town defaults.
-- `--model <MODEL_ID>`: Override Gemini model (defaults to `gemini-3.5-flash`).
-
-### 🦙 Running 100% Free with Local Models (Ollama or LM Studio / Bionic)
-
-**Option A: Ollama**
-Pull the multimodal Qwen 3.5 model in Ollama:
-```bash
-ollama run qwen3.5
-```
-*(Or for faster turns on lighter VRAM: `ollama run qwen3.5:4b`)*
-
-Run YellowAI with Ollama:
-```bash
-python main.py --backend ollama
-```
-
-**Option B: LM Studio / Bionic (Port 1234)**
-1. Open LM Studio or your local OpenAI-compatible server.
-2. Load any Vision-capable model (e.g. Qwen2.5-VL, Qwen3.5-VL, or Llama-3.2-Vision).
-3. Start the Local Server on port `1234`.
-4. Launch YellowAI:
-```bash
-python main.py --backend bionic
-```
-
----
-
-## 📺 OBS Studio Stream Overlay (HUD)
-
-A live animated streamer HUD is included in `overlay/`:
-1. In **OBS Studio**, add a new **Browser Source**.
-2. Check **Local file** and select `m:\Code\YellowAI\overlay\index.html`.
-3. Set width to `480` and height to `360`.
-4. As YellowAI plays, it continuously updates `overlay/overlay_state.json`, displaying:
-   - Live turn counter & last button pressed.
-   - Real-time speech bubble with Gemini's thought.
-   - Interactive 3-tier memory drawer (Short / Medium / Long).

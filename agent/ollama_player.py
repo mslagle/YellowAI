@@ -1,303 +1,490 @@
 """
-Ollama Vision Player for YellowAI.
-Executes local multimodal models (such as Qwen2.5-VL-7B, Qwen2.5-VL-3B, or Llama 3.2 Vision)
-with zero API token costs via Ollama's native REST API.
+Compact Local Ollama VLM Player for YellowAI (`qwen3.5:9b`).
+- 100% local via Ollama `/api/chat` (zero cloud APIs)
+- Multi-turn conversation history + automatic compaction across runs
+- DuckDuckGo internet search tool calling & on-demand `web_search_query`
+- Lossless sign/speech transcription & strategic thinking persistence
+- Strict GBA button outputs: UP, DOWN, LEFT, RIGHT, A, B, SELECT, START
 """
 
+import base64
+from enum import Enum
 import io
 import json
-import base64
-from typing import Optional, Dict, Any, Tuple, Type, List
-from PIL import Image
-import requests
-from pydantic import BaseModel
+import re
+from typing import Any, Dict, List, Optional
 
-import config as app_config
-from agent.gemini_player import (
-    GBAButton,
-    StandardTurnResponse,
-    ThoughtTurnResponse,
-    ShortMemoryTurnResponse,
-    MediumMemoryTurnResponse,
-    LongMemoryTurnResponse
-)
-from agent.prompts import SYSTEM_INSTRUCTION, get_system_instruction, build_turn_prompt
+import requests
+from PIL import Image
+from pydantic import BaseModel, Field
+
+import config
+from agent.prompts import SYSTEM_INSTRUCTION, build_turn_prompt
+from agent.web_search import WebSearchClient
+from core.conversation_history import ConversationHistoryManager
+from core.dialogue_recorder import DialogueRecorder
+from core.goal_tracker import GoalTracker
+from core.thinking_store import ThinkingStore
+
+VALID_GBA_BUTTONS = {"UP", "DOWN", "LEFT", "RIGHT", "A", "B", "SELECT", "START"}
+
+
+class GBAButton(str, Enum):
+    UP = "UP"
+    DOWN = "DOWN"
+    LEFT = "LEFT"
+    RIGHT = "RIGHT"
+    A = "A"
+    B = "B"
+    SELECT = "SELECT"
+    START = "START"
+
+
+class TurnDecision(BaseModel):
+    reasoning: str = Field(..., description="Brief visual observation and rationale for this turn's button presses.")
+    actions: List[GBAButton] = Field(
+        ...,
+        min_length=1,
+        max_length=5,
+        description="REQUIRED: 1 to 5 GBA buttons to press this turn (UP, DOWN, LEFT, RIGHT, A, B, START, SELECT).",
+    )
+    current_area: Optional[str] = Field(default=None, description="Observed town, route, building, or menu name.")
+    screen_kind: Optional[str] = Field(
+        default=None,
+        description="Observed screen category: OVERWORLD, START_MENU, TRAINER_CARD, PARTY_MENU, BAG_MENU, POKEDEX, DIALOGUE, BATTLE, or TITLE_OR_MENU.",
+    )
+    dialogue_text: Optional[str] = Field(
+        default=None,
+        description="Verbatim text of any visible sign, speech bubble, battle box, or menu status so Python archives it.",
+    )
+    discovered_fact: Optional[str] = Field(
+        default=None,
+        description="Optional verified fact read from Start Menu / Trainer Card / Bag / Party / Pokédex / Sign.",
+    )
+    ready_to_plan_goal: Optional[bool] = Field(
+        default=None,
+        description="Set true after finishing Start Menu / sign inspection to synthesize your next objective from online search.",
+    )
+    completed_goal: Optional[str] = Field(
+        default=None,
+        description="Set to 'CURRENT' (or the finished goal text) to permanently DROP an already-completed goal.",
+    )
+    active_goal_update: Optional[str] = Field(
+        default=None,
+        description="Optional concrete new active goal if current goal was dropped or discovered via menus/signs/web.",
+    )
+    next_step: Optional[str] = Field(default=None, description="Short 1-line immediate physical next step.")
+    grand_goal_update: Optional[str] = Field(default=None, description="Optional update to overarching grand goal.")
+    web_search_query: Optional[str] = Field(
+        default=None,
+        description="Optional internet search query if unsure how to progress, find an item/location, or beat a battle/puzzle.",
+    )
+    strategic_insight: Optional[str] = Field(
+        default=None,
+        description="Optional 1-sentence reusable lesson to remember across future runs.",
+    )
+
+
+class GoalSynthesis(BaseModel):
+    confirmed_completed_goals: List[str] = Field(
+        default_factory=list,
+        description="Any goals proven ALREADY completed based on inspected Badges, Party, Bag, Pokédex, or Signs.",
+    )
+    new_active_goal: str = Field(..., description="Concrete, single next objective to accomplish next.")
+    next_step: str = Field(..., description="Immediate physical next step to start pursuing `new_active_goal`.")
+    completion_criteria: str = Field(..., description="Clear observable condition showing `new_active_goal` is done.")
+    grand_goal: Optional[str] = Field(default=None, description="Updated overarching goal if appropriate.")
 
 
 class OllamaPlayer:
+    """Single-backend local Ollama multimodal agent for Pokémon Recharged Yellow."""
+
     def __init__(
         self,
-        base_url: str = "http://localhost:11434",
-        model_id: str = "qwen3.5",
+        base_url: str = config.OLLAMA_BASE_URL,
+        model_id: str = config.OLLAMA_MODEL_ID,
         temperature: float = 0.2,
-        timeout: float = 45.0
+        timeout: float = config.OLLAMA_TIMEOUT,
+        num_ctx: int = config.OLLAMA_NUM_CTX,
+        think_mode: str = config.OLLAMA_THINK_MODE,
+        enable_web_search: bool = config.OLLAMA_ENABLE_WEB_SEARCH,
+        history_manager: Optional[ConversationHistoryManager] = None,
+        web_client: Optional[WebSearchClient] = None,
+        thinking_store: Optional[ThinkingStore] = None,
+        goal_tracker: Optional[GoalTracker] = None,
+        dialogue_recorder: Optional[DialogueRecorder] = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.model_id = model_id
         self.temperature = temperature
         self.timeout = timeout
-        self.consecutive_errors: int = 0
+        self.num_ctx = num_ctx
+        self.think_mode = (think_mode or "auto").lower().strip()
+        self.enable_web_search = enable_web_search
+        self.consecutive_errors = 0
 
-    def select_schema_for_turn(self, turn_id: int) -> Tuple[Type[BaseModel], str]:
-        """Determines response model schema and cadence tag based on turn counter."""
-        if turn_id > 0 and turn_id % 100 == 0:
-            return LongMemoryTurnResponse, "CADENCE_LONG_MEMORY"
-        elif turn_id > 0 and turn_id % 50 == 0:
-            return MediumMemoryTurnResponse, "CADENCE_MEDIUM_MEMORY"
-        elif turn_id > 0 and turn_id % 10 == 0:
-            return ShortMemoryTurnResponse, "CADENCE_SHORT_MEMORY"
-        elif turn_id > 0 and turn_id % 5 == 0:
-            return ThoughtTurnResponse, "CADENCE_THOUGHT"
-        else:
-            return StandardTurnResponse, "CADENCE_STANDARD"
+        self.history_manager = history_manager or ConversationHistoryManager()
+        self.web_client = web_client or WebSearchClient()
+        self.thinking_store = thinking_store or ThinkingStore()
+        self.goal_tracker = goal_tracker or GoalTracker()
+        self.dialogue_recorder = dialogue_recorder or DialogueRecorder()
 
     @staticmethod
-    def flatten_actions(result_data: Dict[str, Any]) -> List[str]:
-        raw_actions = result_data.get("actions") or result_data.get("recommended_actions")
-        flat: List[str] = []
-        if isinstance(raw_actions, list):
-            for item in raw_actions:
-                if isinstance(item, str):
-                    flat.append(item.upper().strip())
-                elif isinstance(item, dict):
-                    btn = item.get("button", "WAIT")
-                    rep = item.get("repeat", 1)
-                    try:
-                        rep = int(rep)
-                    except Exception:
-                        rep = 1
-                    for _ in range(max(1, min(8, rep))):
-                        flat.append(str(btn).upper().strip())
-        elif isinstance(raw_actions, str):
-            flat.append(raw_actions.upper().strip())
+    def _normalize_button(btn: Any) -> Optional[str]:
+        s = str(btn or "").upper().strip()
+        aliases = {"U": "UP", "D": "DOWN", "L": "LEFT", "R": "RIGHT", "ENTER": "START", "BACKSPACE": "SELECT"}
+        s = aliases.get(s, s)
+        return s if s in VALID_GBA_BUTTONS else None
 
-        if not flat:
-            fallback_btn = result_data.get("button") or result_data.get("recommended_button")
-            if fallback_btn:
-                flat.append(str(fallback_btn).upper().strip())
-            else:
-                flat.append("WAIT")
-        return flat
+    @classmethod
+    def flatten_actions(cls, result_data: Dict[str, Any]) -> List[str]:
+        raw = result_data.get("actions")
+        buttons: List[str] = []
+        if isinstance(raw, list):
+            for item in raw:
+                if isinstance(item, dict):
+                    norm = cls._normalize_button(item.get("button"))
+                    rep = int(item.get("repeat", 1) or 1)
+                    if norm:
+                        buttons.extend([norm] * max(1, min(5, rep)))
+                else:
+                    norm = cls._normalize_button(item)
+                    if norm:
+                        buttons.append(norm)
+        elif isinstance(raw, str):
+            for tok in re.split(r"[\s,->]+", raw):
+                norm = cls._normalize_button(tok)
+                if norm:
+                    buttons.append(norm)
+        return buttons[: config.MAX_BATCH_ACTIONS] if buttons else ["A"]
+
+    @staticmethod
+    def _encode_image_b64(img: Image.Image, quality: int = 85) -> str:
+        buf = io.BytesIO()
+        img.convert("RGB").save(buf, format="JPEG", quality=quality)
+        return base64.b64encode(buf.getvalue()).decode("utf-8")
+
+    @staticmethod
+    def _parse_json(raw_text: str) -> Dict[str, Any]:
+        text = (raw_text or "").strip()
+        if not text:
+            return {}
+        try:
+            return json.loads(text)
+        except Exception:
+            pass
+        fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+        if fenced:
+            try:
+                return json.loads(fenced.group(1))
+            except Exception:
+                pass
+        start, end = text.find("{"), text.rfind("}")
+        if start != -1 and end > start:
+            try:
+                return json.loads(text[start : end + 1])
+            except Exception:
+                pass
+        return {}
 
     def is_server_reachable(self) -> bool:
-        """Verifies if the local Ollama daemon is reachable."""
         try:
-            resp = requests.get(f"{self.base_url}/api/tags", timeout=3.0)
-            return resp.status_code == 200
+            return requests.get(f"{self.base_url}/api/tags", timeout=3.0).status_code == 200
         except Exception:
             return False
 
     def is_model_available(self) -> bool:
-        """Checks if the target model is downloaded locally in Ollama."""
         try:
             resp = requests.get(f"{self.base_url}/api/tags", timeout=3.0)
-            if resp.status_code == 200:
-                models = [m.get("name", "") for m in resp.json().get("models", [])]
-                # Match full name (e.g. qwen2.5-vl:7b) or prefix
-                return any(self.model_id in m or m.startswith(self.model_id) for m in models)
-            return False
+            if resp.status_code != 200:
+                return False
+            names = [m.get("name", "") for m in resp.json().get("models", [])]
+            return any(self.model_id == n or n.startswith(self.model_id) for n in names)
         except Exception:
             return False
+
+    def _should_think(self, turn_id: int, stuck_alert: str) -> bool:
+        if self.think_mode == "always":
+            return True
+        if self.think_mode == "never":
+            return False
+        return bool(stuck_alert) or turn_id <= 2 or (turn_id % 8 == 0)
+
+    def _chat(
+        self,
+        messages: List[Dict[str, Any]],
+        think: bool = False,
+        json_schema: Optional[Dict[str, Any]] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "model": self.model_id,
+            "messages": messages,
+            "stream": False,
+            "think": think,
+            "options": {"temperature": self.temperature, "num_ctx": self.num_ctx},
+        }
+        if json_schema is not None:
+            payload["format"] = json_schema
+        if tools:
+            payload["tools"] = tools
+        resp = requests.post(f"{self.base_url}/api/chat", json=payload, timeout=self.timeout)
+        resp.raise_for_status()
+        return resp.json()
+
+    def run_web_research_session(
+        self,
+        objective_question: str,
+        current_area: str = "",
+        image: Optional[Image.Image] = None,
+        max_tool_rounds: int = 2,
+    ) -> Dict[str, Any]:
+        """Runs Ollama native tool calling (`web_search`, `fetch_webpage`) to figure out next steps."""
+        if not self.enable_web_search:
+            return {"summary": "", "used_tools": False}
+
+        user_msg: Dict[str, Any] = {
+            "role": "user",
+            "content": (
+                f"Game: Pokémon Recharged Yellow (GBA Gen-3 Emerald-engine remake of Pokémon Yellow)\n"
+                f"Area: {current_area or self.goal_tracker.current_area}\n"
+                f"Verified Facts: {', '.join(self.goal_tracker.discovered_facts[-5:]) or 'None yet'}\n"
+                f"Question: {objective_question}\n\n"
+                "Use `web_search` to find reliable walkthrough details, then give a concise actionable summary."
+            ),
+        }
+        if image is not None:
+            user_msg["images"] = [self._encode_image_b64(image, quality=80)]
+
+        messages: List[Dict[str, Any]] = [
+            {"role": "system", "content": "Research Pokémon Recharged Yellow concisely using web_search/fetch_webpage."},
+            user_msg,
+        ]
+        tools = self.web_client.get_ollama_tool_schemas()
+        used_tools = False
+        final_text = ""
+
+        try:
+            for _ in range(max_tool_rounds + 1):
+                data = self._chat(messages=messages, think=False, tools=tools)
+                msg = data.get("message", {})
+                final_text = (msg.get("content") or "").strip()
+                tool_calls = msg.get("tool_calls") or []
+                if not tool_calls:
+                    break
+                messages.append(msg)
+                used_tools = True
+                for tc in tool_calls:
+                    fn = tc.get("function", {})
+                    t_name = fn.get("name", "")
+                    t_args = fn.get("arguments", {})
+                    if isinstance(t_args, str):
+                        try:
+                            t_args = json.loads(t_args)
+                        except Exception:
+                            t_args = {}
+                    out = self.web_client.execute_tool_call(t_name, t_args or {})
+                    messages.append({"role": "tool", "name": t_name, "content": out[:3500]})
+
+            if final_text:
+                self.web_client.add_verified_fact(topic=objective_question[:60], summary=final_text[:500])
+                self.thinking_store.add_insight(
+                    insight=final_text[:280],
+                    area=current_area or self.goal_tracker.current_area,
+                    category="WEB_GUIDE",
+                    source="WEB_SEARCH",
+                )
+        except Exception as e:
+            print(f"[OllamaPlayer] Web research note: {e}")
+
+        return {"summary": final_text, "used_tools": used_tools}
+
+    def synthesize_goal_from_discoveries(
+        self,
+        image: Optional[Image.Image] = None,
+        extra_context: str = "",
+    ) -> Dict[str, Any]:
+        """
+        Combines Start Menu discoveries (Badges, Party, Bag, Pokédex), recorded signs/dialogue,
+        and live internet search to drop already-finished goals and synthesize the next goal.
+        """
+        profile = self.goal_tracker.verified_profile
+        area = self.goal_tracker.current_area
+        recent_diag = self.dialogue_recorder.format_recall_prompt(area=area, recent_n=8, area_n=5)
+
+        query = (
+            f"Pokémon Recharged Yellow walkthrough: Current Area='{area}', "
+            f"Badges='{profile.get('badges')}', Party='{profile.get('party')}', "
+            f"Bag='{profile.get('bag')}', Pokédex='{profile.get('pokedex')}'. "
+            "What goals are already done and what should the player do next?"
+        )
+        web_res = self.run_web_research_session(objective_question=query, current_area=area, image=image, max_tool_rounds=2)
+
+        synth_prompt = (
+            "Synthesize our exact verified state and next objective in Pokémon Recharged Yellow.\n\n"
+            f"- Current Location: {area}\n"
+            f"- Verified Menu Profile: {json.dumps(profile, ensure_ascii=False)}\n"
+            f"- Other Discovered Facts: {self.goal_tracker.discovered_facts[-8:]}\n"
+            f"- Already Dropped Goals: {self.goal_tracker.completed_goals[-10:]}\n"
+            f"- Current Candidate Goal: {self.goal_tracker.active_goal}\n"
+            f"{recent_diag}\n"
+            f"[Online Research Summary]:\n{web_res.get('summary', '') or 'No new web results.'}\n"
+            f"{extra_context}\n\n"
+            "Rules:\n"
+            "1. List ANY goal already proven done by Badges/Party/Bag/Pokédex/Signs inside `confirmed_completed_goals`.\n"
+            "2. Choose ONE clear, immediate `new_active_goal` that has NOT been completed yet."
+        )
+
+        messages: List[Dict[str, Any]] = [
+            {"role": "system", "content": "Synthesize grounded Pokémon Recharged Yellow goals from menus, signs, and web search. Output JSON."},
+            {"role": "user", "content": synth_prompt},
+        ]
+        try:
+            data = self._chat(messages=messages, think=False, json_schema=GoalSynthesis.model_json_schema())
+            parsed = self._parse_json(data.get("message", {}).get("content", ""))
+            if parsed and parsed.get("new_active_goal"):
+                self.goal_tracker.apply_synthesized_goal(
+                    new_active_goal=parsed.get("new_active_goal"),
+                    next_step=parsed.get("next_step"),
+                    completion_criteria=parsed.get("completion_criteria"),
+                    grand_goal=parsed.get("grand_goal"),
+                    confirmed_completed_goals=parsed.get("confirmed_completed_goals"),
+                )
+                return parsed
+        except Exception as e:
+            print(f"[OllamaPlayer] Goal synthesis fallback: {e}")
+        return {}
 
     def decide_action(
         self,
         turn_id: int,
         image: Image.Image,
-        memory_context: str = "",
         previous_image: Optional[Image.Image] = None,
-        active_quest: Optional[str] = None,
+        discovery_directive: str = "",
         action_history: str = "",
         stuck_alert: str = "",
-        mode_hint: str = "",
-        battle_thinking_budget: Optional[int] = None,
-        battle_advisor_prompt: str = "",
-        dialogue_crop: Optional[Image.Image] = None,
-        emulator_verified: bool = False
+        emulator_verified: bool = False,
+        screenshot_path: str = "",
     ) -> Dict[str, Any]:
-        """
-        Queries local Ollama VLM with image, prompt, and JSON schema.
-        HARD SAFEGUARD: Refuses to send requests if emulator is not verified alive.
-        """
+        """Captures multi-turn context + screenshot and returns validated GBA button presses."""
         if not emulator_verified:
-            raise RuntimeError(
-                "[SAFEGUARD BLOCKED] Local VLM call was blocked! Emulator is not verified running."
-            )
+            raise RuntimeError("[SAFEGUARD BLOCKED] Refusing to query Ollama without verified emulator.")
 
-        schema_cls, cadence_tag = self.select_schema_for_turn(turn_id)
+        area = self.goal_tracker.current_area
+        goal = self.goal_tracker.active_goal
+        pinned_goal = self.goal_tracker.format_pinned_anchor()
+
+        self.history_manager.compact_if_needed(
+            ollama_base_url=self.base_url,
+            ollama_model_id=self.model_id,
+            pinned_goal=goal,
+            completed_goals=self.goal_tracker.completed_goals,
+        )
+
+        insights_block = self.thinking_store.format_insights_prompt(area=area, goal=goal, limit=4)
+        dialogue_block = self.dialogue_recorder.format_recall_prompt(area=area, query=goal, recent_n=5, area_n=4)
+        cached_facts = self.web_client.get_relevant_cached_facts(f"{area} {goal}", limit=3)
+        web_block = "[Internet Knowledge Cache]:\n" + "\n".join(f"- {f}" for f in cached_facts) if cached_facts else ""
+
         prompt_text = build_turn_prompt(
             turn_id=turn_id,
-            memory_context=memory_context,
-            active_quest=active_quest or "",
-            action_history=action_history,
+            pinned_goal_block=pinned_goal,
+            discovery_directive=discovery_directive,
             stuck_alert=stuck_alert,
-            mode_hint=mode_hint,
-            battle_advisor_prompt=battle_advisor_prompt
+            action_history=action_history,
+            thinking_insights_block=insights_block,
+            dialogue_archive_block=dialogue_block,
+            web_facts_block=web_block,
         )
 
-        # Convert PIL current image to base64 JPEG
-        img_buffer = io.BytesIO()
-        image.save(img_buffer, format="JPEG", quality=85)
-        img_b64 = base64.b64encode(img_buffer.getvalue()).decode("utf-8")
+        images = []
+        if previous_image is not None and stuck_alert:
+            images.append(self._encode_image_b64(previous_image, quality=75))
+        images.append(self._encode_image_b64(image, quality=85))
 
-        images_list = []
-        include_prev = previous_image is not None and (
-            bool(stuck_alert) or not getattr(app_config, "SEND_PREVIOUS_IMAGE_ONLY_WHEN_STUCK", True)
+        messages = self.history_manager.build_ollama_messages(
+            system_prompt=SYSTEM_INSTRUCTION,
+            current_user_prompt=prompt_text,
+            current_images=images,
+            completed_goals=self.goal_tracker.completed_goals,
         )
-        if include_prev:
-            prev_buffer = io.BytesIO()
-            previous_image.save(prev_buffer, format="JPEG", quality=85)
-            images_list.append(base64.b64encode(prev_buffer.getvalue()).decode("utf-8"))
-        images_list.append(img_b64)
 
-        if dialogue_crop is not None:
-            crop_buffer = io.BytesIO()
-            dialogue_crop.convert("RGB").save(crop_buffer, format="JPEG", quality=95)
-            images_list.append(base64.b64encode(crop_buffer.getvalue()).decode("utf-8"))
-
-        is_battle = bool(battle_advisor_prompt) or "BATTLE" in (mode_hint or "").upper()
-        payload = {
-            "model": self.model_id,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": f"{get_system_instruction(is_battle=is_battle)}\nYou MUST respond ONLY in valid JSON conforming to the requested schema."
-                },
-                {
-                    "role": "user",
-                    "content": prompt_text,
-                    "images": images_list
-                }
-            ],
-            "format": schema_cls.model_json_schema(),
-            "stream": False,
-            "options": {
-                "temperature": self.temperature
-            }
-        }
+        schema = TurnDecision.model_json_schema()
+        use_think = self._should_think(turn_id, stuck_alert)
 
         try:
-            url = f"{self.base_url}/api/chat"
-            resp = requests.post(url, json=payload, timeout=self.timeout)
-            resp.raise_for_status()
+            data = self._chat(messages=messages, think=use_think, json_schema=schema)
+            msg = data.get("message", {})
+            raw_text = (msg.get("content") or "").strip()
+            thinking_text = (msg.get("thinking") or "").strip()
+            result = self._parse_json(raw_text)
+            if not result:
+                raise ValueError(f"Invalid JSON from Ollama: {raw_text[:160]}")
 
-            data = resp.json()
-            raw_text = data.get("message", {}).get("content", "").strip()
+            # Execute on-demand DuckDuckGo lookup if requested by model
+            web_q = result.get("web_search_query")
+            if self.enable_web_search and isinstance(web_q, str) and web_q.strip() and web_q.strip().upper() != "NULL":
+                clean_q = web_q.strip()
+                print(f"[OllamaPlayer] Web search requested: '{clean_q}'")
+                search_res = self.web_client.search(clean_q, max_results=4)
+                snippets = [f"- {r.get('title','')}: {r.get('snippet','')}" for r in search_res.get("results", [])]
+                if snippets:
+                    joined = "\n".join(snippets)
+                    url0 = search_res["results"][0].get("url", "")
+                    self.web_client.add_verified_fact(topic=clean_q[:60], summary=joined[:500], source_url=url0)
+                    followup = messages + [
+                        {"role": "assistant", "content": raw_text},
+                        {
+                            "role": "user",
+                            "content": f"[WEB SEARCH RESULTS for '{clean_q}']:\n{joined}\n\nNow output updated JSON (`web_search_query`: null).",
+                        },
+                    ]
+                    data2 = self._chat(messages=followup, think=False, json_schema=schema)
+                    parsed2 = self._parse_json(data2.get("message", {}).get("content", ""))
+                    if parsed2:
+                        result, data = parsed2, data2
 
-            result_data = json.loads(raw_text)
-            flat_buttons = self.flatten_actions(result_data)
-            result_data["flat_actions"] = flat_buttons
-            result_data["button"] = flat_buttons[0] if flat_buttons else "WAIT"
-            result_data["cadence_tag"] = cadence_tag
+            buttons = self.flatten_actions(result)
+            result["flat_actions"] = buttons
+            result["think_used"] = use_think
 
-            # Token usage reporting from Ollama metrics
-            prompt_tok = data.get("prompt_eval_count", 0)
-            cand_tok = data.get("eval_count", 0)
-            result_data["usage"] = {
-                "prompt_tokens": prompt_tok,
-                "candidates_tokens": cand_tok,
-                "total_tokens": prompt_tok + cand_tok
-            }
+            prompt_tok = int(data.get("prompt_eval_count", 0) or 0)
+            if thinking_text:
+                self.thinking_store.record_trace(
+                    run_id=self.history_manager.current_run_id,
+                    turn_id=turn_id,
+                    area=area,
+                    goal=goal,
+                    thinking_text=thinking_text,
+                    thinking_tokens=max(1, len(thinking_text.split())),
+                    decision_summary=result.get("reasoning", ""),
+                    buttons=buttons,
+                )
 
+            insight = result.get("strategic_insight")
+            if isinstance(insight, str) and insight.strip() and insight.strip().upper() != "NULL":
+                self.thinking_store.add_insight(insight=insight.strip(), area=area, category="GAMEPLAY", source="TURN")
+
+            self.history_manager.record_turn(
+                turn_id=turn_id,
+                area=result.get("current_area") or area,
+                goal=goal,
+                user_summary=f"Area={area} | StuckAlert={stuck_alert[:90]}",
+                assistant_response=result,
+                buttons_executed=buttons,
+                outcome="PENDING",
+                screenshot_path=screenshot_path,
+                prompt_tokens=prompt_tok,
+            )
             self.consecutive_errors = 0
-            return result_data
+            return result
 
         except Exception as e:
             self.consecutive_errors += 1
-            print(f"[OllamaPlayer] Generation error on Turn {turn_id} (consecutive: {self.consecutive_errors}): {e}")
-
-            fallback_btn = "B" if self.consecutive_errors % 2 == 1 else "WAIT"
+            print(f"[OllamaPlayer] Turn {turn_id} fallback ({self.consecutive_errors}): {e}")
             return {
-                "button": fallback_btn,
-                "flat_actions": [fallback_btn],
-                "actions": [fallback_btn],
-                "reasoning": f"Local VLM fallback ({e})",
-                "thought": "Thinking offline with my local brain!",
-                "cadence_tag": "ERROR_FALLBACK"
-            }
-
-    def consult_tactical_rescue(
-        self,
-        image: Image.Image,
-        current_area: str,
-        active_quest: str,
-        micro_step: str,
-        action_history: str,
-        stuck_alert: str,
-        rescue_reason: str,
-        thinking_budget: int = 2048,
-        enable_web_search: bool = False,
-        emulator_verified: bool = False
-    ) -> Dict[str, Any]:
-        """Local tactical rescue using Ollama."""
-        if not emulator_verified:
-            raise RuntimeError("[SAFEGUARD BLOCKED] Local rescue call blocked! Emulator not verified.")
-
-        rescue_prompt = f"""### EMERGENCY TACTICAL RESCUE (POKÉMON YELLOW RECHARGED)
-Trigger: {rescue_reason}
-Area: {current_area}
-Quest: {active_quest}
-Previous micro-step: {micro_step}
-Recent History:
-{action_history}
-Alerts:
-{stuck_alert}
-
-Analyze Red's position, surroundings, and obstacles. Formulate an escape plan."""
-
-        img_buffer = io.BytesIO()
-        image.save(img_buffer, format="JPEG", quality=85)
-        img_b64 = base64.b64encode(img_buffer.getvalue()).decode("utf-8")
-
-        rescue_schema = {
-            "type": "object",
-            "properties": {
-                "situation_analysis": {"type": "string"},
-                "recommended_button": {"type": "string", "enum": ["UP", "DOWN", "LEFT", "RIGHT", "A", "B", "START", "SELECT"]},
-                "tactical_plan": {"type": "string"},
-                "updated_micro_step": {"type": "string"},
-                "stream_thought": {"type": "string"}
-            },
-            "required": ["situation_analysis", "recommended_button", "tactical_plan", "updated_micro_step", "stream_thought"]
-        }
-
-        payload = {
-            "model": self.model_id,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "You are a Pokémon speedrunner escaping a stuck position. Respond strictly in JSON."
-                },
-                {
-                    "role": "user",
-                    "content": rescue_prompt,
-                    "images": [img_b64]
-                }
-            ],
-            "format": rescue_schema,
-            "stream": False,
-            "options": {"temperature": 0.2}
-        }
-
-        try:
-            resp = requests.post(f"{self.base_url}/api/chat", json=payload, timeout=self.timeout)
-            resp.raise_for_status()
-            data = resp.json()
-            result_data = json.loads(data.get("message", {}).get("content", "{}"))
-
-            flat_buttons = self.flatten_actions(result_data)
-            btn = flat_buttons[0] if flat_buttons else "B"
-            result_data["flat_actions"] = flat_buttons
-            result_data["recommended_button"] = btn
-            result_data["cadence_tag"] = "TACTICAL_RESCUE"
-            return result_data
-        except Exception as e:
-            print(f"[OllamaPlayer] Tactical rescue error: {e}")
-            return {
-                "situation_analysis": f"Local rescue error: {e}",
-                "recommended_button": "B",
+                "actions": ["B"],
                 "flat_actions": ["B"],
-                "tactical_plan": "Step back and try orthogonal direction.",
-                "updated_micro_step": "Back out from obstacle",
-                "stream_thought": "Let me reset my bearings real quick!",
-                "cadence_tag": "TACTICAL_RESCUE_FALLBACK"
+                "reasoning": f"Local Ollama fallback: {e}",
+                "fallback": True,
             }
